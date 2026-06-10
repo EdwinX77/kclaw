@@ -1,0 +1,98 @@
+{
+  plugins: {
+    entries: {
+      feishu: { enabled: true },
+      "pattern-strategy": {
+        enabled: true,
+        config: {
+          baseUrl: "http://127.0.0.1:18080",
+          chartBaseUrl: "http://127.0.0.1:18000",
+          timeoutMs: 30000,
+          tradingPrinciples: [
+            "流动市值100亿以下的要慎重。",
+            "股价低于20的不要参与不要参与。",
+            "注意大盘趋势，做好择时。",
+          ],
+        },
+      },
+      "pattern-quotation": {
+        enabled: true,
+        config: {
+          baseUrl: "http://127.0.0.1:18080",
+          timeoutMs: 30000,
+        },
+      },
+    },
+  },
+
+  agents: {
+    list: [
+      {
+        id: "pattern-strategy",
+        workspace: "/home/edwin/workspace/myclaw/.openclaw-runtime/workspace/pattern-strategy",
+        agentDir: "/home/edwin/workspace/myclaw/.openclaw-runtime/agents/pattern-strategy/agent",
+        skills: ["pattern-strategy-core"],
+        tools: {
+          allow: ["pattern-strategy", "pattern-quotation"],
+        },
+      },
+      {
+        id: "pattern-chan",
+        workspace: "/home/edwin/workspace/myclaw/.openclaw-runtime/workspace/pattern-chan",
+        agentDir: "/home/edwin/workspace/myclaw/.openclaw-runtime/agents/pattern-chan/agent",
+        skills: ["pattern-chan-core"],
+        tools: {
+          // Hard-limit this agent to the Chan chart bridge tool plus read-only context.
+          allow: ["read", "chan_generate_chart"],
+        },
+      },
+    ],
+  },
+
+  channels: {
+    feishu: {
+      enabled: true,
+      accounts: {
+        main: {
+          appId: "${FEISHU_APP_ID}",
+          appSecret: "${FEISHU_APP_SECRET}",
+          botName: "Tas",
+        },
+      },
+      dmPolicy: "allowlist",
+      allowFrom: ["ou_94227d94dc7161416573a69b5fee12cd"],
+      groupPolicy: "allowlist",
+      groupAllowFrom: ["oc_926ae0fb9d722371720c4d2d9d89f6ac"],
+      groups: {
+        oc_926ae0fb9d722371720c4d2d9d89f6ac: {
+          enabled: true,
+          requireMention: true,
+          allowFrom: ["ou_94227d94dc7161416573a69b5fee12cd"],
+        },
+      },
+    },
+  },
+
+  bindings: [
+    {
+      agentId: "pattern-strategy",
+      match: {
+        channel: "feishu",
+        peer: {
+          kind: "group",
+          id: "oc_926ae0fb9d722371720c4d2d9d89f6ac",
+        },
+      },
+    },
+    {
+      agentId: "pattern-strategy",
+      match: {
+        channel: "feishu",
+        peer: {
+          kind: "direct",
+          id: "ou_94227d94dc7161416573a69b5fee12cd",
+        },
+      },
+    },
+  ],
+}

@@ -1,0 +1,12 @@
+{
+  "name": "@openclaw/pattern-quotation",
+  "version": "2026.2.26",
+  "private": true,
+  "description": "Pattern Quotation remote tool bridge for OpenClaw",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

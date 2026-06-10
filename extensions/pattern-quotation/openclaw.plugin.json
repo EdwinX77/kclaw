@@ -1,0 +1,27 @@
+{
+  "id": "pattern-quotation",
+  "name": "Pattern Quotation",
+  "description": "MCP sub-service for Pattern market quotation and information refresh. Exposes fixed refresh/status actions; Strategy remains the primary Pattern MCP service.",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "description": "Base URL for the Pattern Quotation MCP tool bridge service.",
+        "default": "http://127.0.0.1:18080"
+      },
+      "timeoutMs": {
+        "type": "number",
+        "description": "Per-request timeout for remote tool calls.",
+        "default": 30000
+      },
+      "asyncPollSeconds": {
+        "type": "number",
+        "description": "Polling interval for asynchronous quotation refresh completion checks.",
+        "default": 15
+      }
+    }
+  }
+}

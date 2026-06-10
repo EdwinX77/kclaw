@@ -1,0 +1,147 @@
+{
+  "generatedFrom": "myclaw/.openclaw-runtime/openclaw.json",
+  "redacted": true,
+  "note": "Inventory only. Do not treat this as runnable config; migrate values into a separate local KClaw state directory after validation.",
+  "topLevelKeys": [
+    "agents",
+    "auth",
+    "bindings",
+    "browser",
+    "channels",
+    "commands",
+    "gateway",
+    "hooks",
+    "messages",
+    "meta",
+    "models",
+    "plugins",
+    "session",
+    "skills",
+    "tools",
+    "wizard"
+  ],
+  "plugins": {
+    "allow": [
+      "pattern-strategy",
+      "pattern-quotation",
+      "telegram",
+      "feishu"
+    ],
+    "entries": [
+      "feishu",
+      "pattern-quotation",
+      "pattern-strategy",
+      "telegram"
+    ]
+  },
+  "channels": [
+    "feishu",
+    "telegram"
+  ],
+  "agents": [
+    {
+      "id": "main",
+      "skills": [],
+      "hasWorkspace": false,
+      "hasAgentDir": false,
+      "toolPolicyKeys": []
+    },
+    {
+      "id": "tas-dispatch",
+      "skills": [
+        "pattern-strategy-orchestrator",
+        "canslim-enrichment",
+        "agent-skills-context-engineering",
+        "summarize-pro"
+      ],
+      "hasWorkspace": true,
+      "hasAgentDir": true,
+      "toolPolicyKeys": [
+        "allow"
+      ]
+    },
+    {
+      "id": "pattern-chan",
+      "skills": [
+        "pattern-chan-core"
+      ],
+      "hasWorkspace": true,
+      "hasAgentDir": true,
+      "toolPolicyKeys": [
+        "allow"
+      ]
+    },
+    {
+      "id": "pattern-strategy",
+      "skills": [
+        "pattern-strategy-core"
+      ],
+      "hasWorkspace": true,
+      "hasAgentDir": true,
+      "toolPolicyKeys": [
+        "allow"
+      ]
+    },
+    {
+      "id": "pattern-quotation",
+      "skills": [
+        "pattern-quotation-core"
+      ],
+      "hasWorkspace": true,
+      "hasAgentDir": true,
+      "toolPolicyKeys": [
+        "allow"
+      ]
+    },
+    {
+      "id": "market-research",
+      "skills": [
+        "canslim-enrichment",
+        "agent-skills-context-engineering",
+        "summarize-pro",
+        "memory-wiki-isolated"
+      ],
+      "hasWorkspace": true,
+      "hasAgentDir": true,
+      "toolPolicyKeys": [
+        "allow"
+      ]
+    },
+    {
+      "id": "market-memory",
+      "skills": [
+        "memory-wiki-isolated",
+        "agent-skills-context-engineering"
+      ],
+      "hasWorkspace": true,
+      "hasAgentDir": true,
+      "toolPolicyKeys": [
+        "allow"
+      ]
+    }
+  ],
+  "models": {
+    "providerIds": [
+      "deepseek"
+    ],
+    "hasDefaults": false
+  },
+  "bindings": {
+    "keys": []
+  },
+  "hooks": {
+    "keys": [
+      "internal"
+    ]
+  },
+  "skills": {
+    "keys": [
+      "install"
+    ]
+  },
+  "migrationNotes": [
+    "Keep pattern-strategy and pattern-quotation plugin ids unchanged.",
+    "Validate telegram and feishu against the official v2026.6.5 plugin/runtime behavior before copying live credentials.",
+    "Use official google/qwen/minimax provider plugins instead of old standalone auth plugins unless a missing behavior is found."
+  ]
+}

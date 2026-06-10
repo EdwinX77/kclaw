@@ -1,0 +1,40 @@
+{
+  "id": "pattern-strategy",
+  "name": "Pattern Strategy",
+  "description": "Bridge Pattern Strategy HTTP-exposed tools into OpenClaw agent tools.",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "description": "Base URL for the Pattern Strategy tool bridge service.",
+        "default": "http://127.0.0.1:18080"
+      },
+      "chartBaseUrl": {
+        "type": "string",
+        "description": "Base URL for generated Pattern Strategy chart image downloads.",
+        "default": "http://127.0.0.1:18000"
+      },
+      "timeoutMs": {
+        "type": "number",
+        "description": "Per-request timeout for remote tool calls.",
+        "default": 30000
+      },
+      "asyncPollSeconds": {
+        "type": "number",
+        "description": "Polling interval for deterministic Pattern Strategy async watches. This is code-driven and does not invoke an LLM.",
+        "default": 60
+      },
+      "tradingPrinciples": {
+        "type": "array",
+        "description": "User trading experience and risk-control principles that are injected into every fresh/actionable signal enrichment callback. These principles guide final interpretation only and do not replace formal strategy signals.",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      }
+    }
+  }
+}

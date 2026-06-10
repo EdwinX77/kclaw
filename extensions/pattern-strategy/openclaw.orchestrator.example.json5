@@ -1,0 +1,259 @@
+{
+  skills: {
+    load: {
+      // Community skills were installed into this repo workspace via ClawHub.
+      // Add the repo skills dir explicitly so non-repo agent workspaces can still load them.
+      extraDirs: ["/home/edwin/workspace/myclaw/skills"],
+    },
+  },
+
+  plugins: {
+    entries: {
+      feishu: { enabled: true },
+      "pattern-strategy": {
+        enabled: true,
+        config: {
+          baseUrl: "http://127.0.0.1:18080",
+          chartBaseUrl: "http://127.0.0.1:18000",
+          timeoutMs: 30000,
+          tradingPrinciples: [
+            "流动市值100亿以下的要慎重。",
+            "股价低于20的不要参与不要参与。",
+            "注意大盘趋势，做好择时。",
+          ],
+        },
+      },
+      "pattern-quotation": {
+        enabled: true,
+        config: {
+          baseUrl: "http://127.0.0.1:18080",
+          timeoutMs: 30000,
+        },
+      },
+      "memory-core": { enabled: true },
+      // Future: replace the isolated memory agent with a dedicated memory-wiki plugin
+      // once it is installed on this host and validated.
+    },
+    slots: {
+      memory: "memory-core",
+    },
+  },
+
+  agents: {
+    list: [
+      {
+        id: "tas-dispatch",
+        workspace: "/home/edwin/workspace/myclaw/.openclaw-runtime/workspace/tas-dispatch",
+        agentDir: "/home/edwin/workspace/myclaw/.openclaw-runtime/agents/tas-dispatch/agent",
+        heartbeat: {
+          every: "5m",
+          target: "last",
+          prompt: "Check for async completion callbacks and continue any pending long-running work before starting new user work.",
+          ackMaxChars: 0,
+        },
+        skills: [
+          "pattern-strategy-orchestrator",
+          "canslim-enrichment",
+          "agent-skills-context-engineering",
+          "summarize-pro",
+        ],
+        subagents: {
+          allowAgents: [
+            "pattern-strategy",
+            "pattern-quotation",
+            "market-research",
+            "market-memory",
+          ],
+        },
+        tools: {
+          allow: [
+            "read",
+            "agents_list",
+            "sessions_list",
+            "sessions_history",
+            "sessions_send",
+            "sessions_spawn",
+            "session_status",
+            "chan_generate_chart",
+            "cron",
+            "pattern-strategy",
+            "pattern-quotation",
+            "group:memory",
+            "group:web",
+            "browser",
+          ],
+        },
+      },
+      {
+        id: "pattern-chan",
+        workspace: "/home/edwin/workspace/myclaw/.openclaw-runtime/workspace/pattern-chan",
+        agentDir: "/home/edwin/workspace/myclaw/.openclaw-runtime/agents/pattern-chan/agent",
+        skills: ["pattern-chan-core"],
+        tools: {
+          // Hard-limit this agent to the Chan chart bridge tool plus read-only context.
+          allow: ["read", "chan_generate_chart"],
+        },
+      },
+      {
+        id: "pattern-strategy",
+        workspace: "/home/edwin/workspace/myclaw/.openclaw-runtime/workspace/pattern-strategy",
+        agentDir: "/home/edwin/workspace/myclaw/.openclaw-runtime/agents/pattern-strategy/agent",
+        skills: ["pattern-strategy-core"],
+        tools: {
+          allow: ["read", "pattern-strategy"],
+        },
+      },
+      {
+        id: "pattern-quotation",
+        workspace: "/home/edwin/workspace/myclaw/.openclaw-runtime/workspace/pattern-quotation",
+        agentDir: "/home/edwin/workspace/myclaw/.openclaw-runtime/agents/pattern-quotation/agent",
+        skills: ["pattern-quotation-core"],
+        tools: {
+          allow: ["read", "pattern-quotation"],
+        },
+      },
+      {
+        id: "market-research",
+        workspace: "/home/edwin/workspace/myclaw/.openclaw-runtime/workspace/market-research",
+        agentDir: "/home/edwin/workspace/myclaw/.openclaw-runtime/agents/market-research/agent",
+        skills: [
+          "canslim-enrichment",
+          "agent-skills-context-engineering",
+          "summarize-pro",
+          "memory-wiki-isolated",
+        ],
+        tools: {
+          allow: ["read", "pattern-strategy", "group:web", "browser", "group:memory"],
+        },
+      },
+      {
+        id: "market-memory",
+        workspace: "/home/edwin/workspace/myclaw/.openclaw-runtime/workspace/market-memory",
+        agentDir: "/home/edwin/workspace/myclaw/.openclaw-runtime/agents/market-memory/agent",
+        skills: ["memory-wiki-isolated", "agent-skills-context-engineering"],
+        tools: {
+          allow: ["read", "group:memory"],
+        },
+      },
+    ],
+  },
+
+  tools: {
+    agentToAgent: {
+      enabled: true,
+      allow: [
+        "pattern-strategy",
+        "pattern-quotation",
+        "market-research",
+        "market-memory",
+      ],
+    },
+    sessions: {
+      visibility: "all",
+    },
+    web: {
+      search: {
+        enabled: true,
+        provider: "brave",
+        apiKey: "${BRAVE_API_KEY}",
+        maxResults: 5,
+        timeoutSeconds: 30,
+      },
+      fetch: {
+        enabled: true,
+        maxChars: 50000,
+        maxCharsCap: 50000,
+        timeoutSeconds: 30,
+        cacheTtlMinutes: 15,
+      },
+    },
+  },
+
+  session: {
+    dmScope: "per-channel-peer",
+    agentToAgent: {
+      maxPingPongTurns: 0,
+    },
+  },
+
+  // Recommended orchestration model:
+  // 1. tas-dispatch uses sessions_spawn only to open an internal child session.
+  // 2. tas-dispatch uses sessions_send with timeoutSeconds > 0 to ask pattern-strategy
+  //    for a synchronous structured reply that includes the business job_id.
+  // 3. tas-dispatch handles Chan chart requests directly with chan_generate_chart;
+  //    chart requests do not create child sessions, watchers, or cron jobs.
+  // 4. Final strategy completion should be tracked by Pattern Strategy job_id, not by
+  //    subagent run id or child session key.
+  // 5. Long-running completion delivery still needs a durable watcher/registry layer;
+  //    sessions_spawn announce is best-effort and should not be treated as a 2h SLA path.
+  //
+  // Recommended cron setup:
+  // - Create the Pattern Quotation daily refresh as an isolated cron job 2 hours before
+  //   the Pattern Strategy scan. Example if strategy runs at 15:20 Asia/Shanghai:
+  //   openclaw cron add --name "Pattern Quotation daily refresh" --cron "20 13 * * 1-5" --tz Asia/Shanghai --session isolated --agent pattern-quotation --message "Run the Pattern Quotation daily refresh. Use quotation_refresh_today, return job_id and message, then register quotation_watch_refresh if the job is not terminal. Terminal quotation completion should be delivered directly from the service message without LLM rewriting." --announce --channel feishu --to "chat:oc_926ae0fb9d722371720c4d2d9d89f6ac"
+  // - Cron does not model job dependencies such as "after Pattern Quotation completes".
+  //   Schedule the supporting board-index refresh at a fixed later slot, for example 09:00:
+  //   openclaw cron add --name "board index daily refresh" --cron "0 9 * * 1-5" --tz Asia/Shanghai --session isolated --agent pattern-strategy --message "Run the Pattern board-index daily refresh for the previous trading day. Use indice_refresh_run with dimensions=[\"industry\",\"size\",\"style\",\"concept\"], refresh_turnover=true, force_universe=false, source=openclaw_cron, and idempotency_key=indice-daily-YYYYMMDD. Return job_id/status/message, then call indice_watch_refresh so the terminal result is pushed to Feishu without LLM polling." --announce --channel feishu --to "chat:oc_926ae0fb9d722371720c4d2d9d89f6ac"
+  // - Keep the Pattern Strategy scan at 15:20 Asia/Shanghai or later so it reads refreshed
+  //   quotation, equity event, margin trading, and financial-report-month supplemental data.
+
+  browser: {
+    enabled: true,
+    evaluateEnabled: true,
+    defaultProfile: "openclaw",
+    profiles: {
+      openclaw: { cdpPort: 18800, color: "#FF4500" },
+    },
+  },
+  channels: {
+    feishu: {
+      enabled: true,
+      accounts: {
+        main: {
+          appId: "${FEISHU_APP_ID}",
+          appSecret: "${FEISHU_APP_SECRET}",
+          botName: "Tas",
+        },
+      },
+      dmPolicy: "allowlist",
+      allowFrom: ["ou_94227d94dc7161416573a69b5fee12cd"],
+      groupPolicy: "allowlist",
+      groupAllowFrom: ["oc_926ae0fb9d722371720c4d2d9d89f6ac"],
+      groups: {
+        oc_926ae0fb9d722371720c4d2d9d89f6ac: {
+          enabled: true,
+          requireMention: true,
+          allowFrom: ["ou_94227d94dc7161416573a69b5fee12cd"],
+        },
+      },
+    },
+  },
+
+  bindings: [
+    {
+      agentId: "tas-dispatch",
+      match: {
+        channel: "feishu",
+        peer: {
+          kind: "group",
+          id: "oc_926ae0fb9d722371720c4d2d9d89f6ac",
+        },
+      },
+    },
+    {
+      agentId: "tas-dispatch",
+      match: {
+        channel: "feishu",
+        peer: {
+          kind: "direct",
+          id: "ou_94227d94dc7161416573a69b5fee12cd",
+        },
+      },
+    },
+  ],
+
+  // Future phase:
+  // memory: {
+  //   backend: "qmd",
+  // }
+}

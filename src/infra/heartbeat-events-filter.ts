@@ -4,6 +4,7 @@ import { HEARTBEAT_RESPONSE_TOOL_INSTRUCTIONS } from "../auto-reply/heartbeat.js
 import { HEARTBEAT_TOKEN } from "../auto-reply/tokens.js";
 
 const MAX_EXEC_EVENT_PROMPT_CHARS = 8_000;
+export const ASYNC_COMPLETION_EVENT_PREFIX = "Async completion:";
 const STRUCTURED_EXEC_COMPLETION_EVENT_RE =
   /^exec (completed|failed) \(([a-z0-9_-]{1,64}), (code -?\d+|signal [^)]+)\)(?: :: ([\s\S]*))?$/i;
 
@@ -209,10 +210,16 @@ export function isExecCompletionEvent(evt: string): boolean {
   );
 }
 
+export function isAsyncCompletionEvent(evt: string): boolean {
+  return normalizeLowercaseStringOrEmpty(evt.trim()).startsWith(
+    normalizeLowercaseStringOrEmpty(ASYNC_COMPLETION_EVENT_PREFIX),
+  );
+}
+
 // Returns true when a system event should be treated as real cron reminder content.
 export function isCronSystemEvent(evt: string) {
   if (!evt.trim()) {
     return false;
   }
-  return !isHeartbeatNoiseEvent(evt) && !isExecCompletionEvent(evt);
+  return !isHeartbeatNoiseEvent(evt) && !isExecCompletionEvent(evt) && !isAsyncCompletionEvent(evt);
 }
