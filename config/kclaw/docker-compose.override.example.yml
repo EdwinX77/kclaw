@@ -1,0 +1,48 @@
+services:
+  openclaw-gateway:
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
+      - 1.1.1.1
+      - 8.8.8.8
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - sh
+      - -lc
+      - |
+        ln -sfn /app/src /home/node/.openclaw/src
+        node -e '
+        const net = require("net");
+        const listenHost = process.env.OPENCLAW_CDP_PROXY_LISTEN_HOST || "127.0.0.1";
+        const listenPort = Number(process.env.OPENCLAW_CDP_PROXY_LISTEN_PORT || 9223);
+        const targetHost = process.env.OPENCLAW_CDP_PROXY_TARGET_HOST || "host.docker.internal";
+        const targetPort = Number(process.env.OPENCLAW_CDP_PROXY_TARGET_PORT || 9222);
+        const server = net.createServer((client) => {
+          const upstream = net.connect(targetPort, targetHost);
+          client.pipe(upstream);
+          upstream.pipe(client);
+          const close = () => {
+            client.destroy();
+            upstream.destroy();
+          };
+          client.on("error", close);
+          upstream.on("error", close);
+        });
+        server.on("error", (error) => {
+          console.error("[cdp-proxy] failed: " + error.message);
+          process.exit(1);
+        });
+        server.listen(listenPort, listenHost, () => {
+          console.log("[cdp-proxy] " + listenHost + ":" + listenPort + " -> " + targetHost + ":" + targetPort);
+        });
+        setInterval(() => {}, 1 << 30);
+        ' &
+        exec node dist/index.js gateway --bind "$${OPENCLAW_GATEWAY_BIND:-lan}" --port 18789
+  openclaw-cli:
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

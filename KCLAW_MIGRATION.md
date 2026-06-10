@@ -21,7 +21,9 @@ The first migration phase keeps the package and CLI name as `openclaw` to avoid 
   - `scripts/docker/openclaw-docker-common.sh`
   - `scripts/docker/openclaw-selfcheck.sh`
   - `scripts/docker/openclaw-service.sh`
-  - `docker-compose.override.yml`
+  - `config/kclaw/docker-compose.override.example.yml`
+
+The repository root `docker-compose.override.yml` is intentionally ignored by upstream OpenClaw and should remain a local runtime file. Copy `config/kclaw/docker-compose.override.example.yml` to `docker-compose.override.yml` only inside a validation checkout that is meant to run KClaw.
 
 ## Config Policy
 
