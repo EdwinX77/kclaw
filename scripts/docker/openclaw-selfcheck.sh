@@ -95,6 +95,8 @@ check_gateway_health() {
   for attempt in $(seq 1 "$max_attempts"); do
     if openclaw_docker_compose exec -T \
       -e "OPENCLAW_GATEWAY_TOKEN=$OPENCLAW_GATEWAY_TOKEN" \
+      -e "OPENCLAW_GATEWAY_PORT=18789" \
+      -e "OPENCLAW_GATEWAY_URL=http://127.0.0.1:18789" \
       openclaw-gateway node dist/index.js health >"$output_file" 2>&1; then
       pass "Gateway health probe succeeded"
       rm -f "$output_file"
@@ -176,6 +178,26 @@ check_config_file() {
     pass "FEISHU_APP_ID and FEISHU_APP_SECRET are available in environment"
   else
     warn "FEISHU_APP_ID or FEISHU_APP_SECRET is missing from .env or process env"
+  fi
+
+  local feishu_render_mode feishu_streaming feishu_block_streaming
+  feishu_render_mode="$(json_query "$config_path" "config.channels?.feishu?.renderMode" 2>/dev/null || true)"
+  feishu_streaming="$(json_query "$config_path" "config.channels?.feishu?.streaming" 2>/dev/null || true)"
+  feishu_block_streaming="$(json_query "$config_path" "config.channels?.feishu?.blockStreaming" 2>/dev/null || true)"
+  if [[ "$feishu_render_mode" == "raw" ]]; then
+    pass "Feishu renderMode is raw for efficient chat replies"
+  else
+    fail "Feishu renderMode must be raw so only explicit strategy signal cards render as cards"
+  fi
+  if [[ "$feishu_streaming" == "false" || -z "$feishu_streaming" ]]; then
+    pass "Feishu streaming card updates are disabled"
+  else
+    fail "Feishu streaming must be false for kclaw live chat efficiency"
+  fi
+  if [[ "$feishu_block_streaming" == "false" || -z "$feishu_block_streaming" ]]; then
+    pass "Feishu block streaming is disabled"
+  else
+    fail "Feishu blockStreaming must be false for kclaw live chat efficiency"
   fi
 
   if [[ "$(json_query "$config_path" "Boolean(config.plugins?.entries?.['pattern-strategy']?.enabled)" 2>/dev/null || true)" == "true" ]]; then

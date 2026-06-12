@@ -250,27 +250,85 @@ export function parseMergeForwardContent(params: { content: string; log?: Feishu
 }
 
 export function checkBotMentioned(event: FeishuMessageLike, botOpenId?: string): boolean {
-  if (!botOpenId) {
+  return checkBotMentionedByIdentity(event, { botOpenId });
+}
+
+function normalizeBotMentionAlias(value: string | undefined): string | undefined {
+  const normalized = value?.trim().replace(/^@+/, "").replace(/\s+/g, " ").toLowerCase();
+  return normalized || undefined;
+}
+
+function botMentionAliases(botName?: string): Set<string> {
+  const aliases = new Set<string>();
+  const normalized = normalizeBotMentionAlias(botName);
+  if (!normalized) {
+    return aliases;
+  }
+  aliases.add(normalized);
+  const firstToken = normalized.split(/\s+/u)[0]?.trim();
+  if (firstToken && firstToken.length >= 2) {
+    aliases.add(firstToken);
+  }
+  return aliases;
+}
+
+export function isFeishuBotMention(
+  mention: FeishuMention,
+  identity: { botOpenId?: string; botName?: string },
+): boolean {
+  if (isFeishuBroadcastMention(mention)) {
     return false;
   }
+  const botOpenId = identity.botOpenId?.trim();
+  if (botOpenId && mention.id.open_id?.trim() === botOpenId) {
+    return true;
+  }
+  const mentionName = normalizeBotMentionAlias(mention.name);
+  if (!mentionName) {
+    return false;
+  }
+  return botMentionAliases(identity.botName).has(mentionName);
+}
+
+function hasLeadingBotNameMention(text: string, botName?: string): boolean {
+  const aliases = botMentionAliases(botName);
+  if (aliases.size === 0) {
+    return false;
+  }
+  const trimmed = text.trimStart();
+  for (const alias of aliases) {
+    const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`^@${escaped}(?:$|[\\s,，:：])`, "iu").test(trimmed)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function checkBotMentionedByIdentity(
+  event: FeishuMessageLike,
+  identity: { botOpenId?: string; botName?: string },
+): boolean {
   const mentions = event.message.mentions ?? [];
   if (mentions.length > 0) {
-    return mentions.some(
-      (mention) => !isFeishuBroadcastMention(mention) && mention.id.open_id === botOpenId,
-    );
+    if (mentions.some((mention) => isFeishuBotMention(mention, identity))) {
+      return true;
+    }
   }
   if (event.message.message_type === "post") {
     return parsePostContent(event.message.content).mentionedOpenIds.some(
-      (id) => id.trim().toLowerCase() !== "all" && id === botOpenId,
+      (id) => id.trim().toLowerCase() !== "all" && id === identity.botOpenId,
     );
   }
-  return false;
+  const text = parseMessageContent(event.message.content, event.message.message_type);
+  return hasLeadingBotNameMention(text, identity.botName);
 }
 
 export function normalizeMentions(
   text: string,
   mentions?: FeishuMention[],
   botStripId?: string,
+  botName?: string,
 ): string {
   if (!mentions || mentions.length === 0) {
     return text;
@@ -280,12 +338,12 @@ export function normalizeMentions(
   let result = text;
   for (const mention of mentions) {
     const mentionId = mention.id.open_id;
-    const replacement =
-      botStripId && mentionId === botStripId
-        ? ""
-        : mentionId
-          ? `<at user_id="${mentionId}">${escapeName(mention.name)}</at>`
-          : `@${mention.name}`;
+    const stripBotMention = isFeishuBotMention(mention, { botOpenId: botStripId, botName });
+    const replacement = stripBotMention
+      ? ""
+      : mentionId
+        ? `<at user_id="${mentionId}">${escapeName(mention.name)}</at>`
+        : `@${mention.name}`;
     result = result.replace(new RegExp(escaped(mention.key), "g"), () => replacement).trim();
   }
   return result;

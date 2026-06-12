@@ -439,6 +439,7 @@ export type PluginHookBeforeDispatchContext = {
 
 export type PluginHookBeforeDispatchResult = {
   handled: boolean;
+  reply?: ReplyPayload;
   text?: string;
 };
 

@@ -208,6 +208,10 @@
   channels: {
     feishu: {
       enabled: true,
+      // Keep normal Feishu replies as plain messages; strategy signal delivery sends an explicit native card.
+      renderMode: "raw",
+      streaming: false,
+      blockStreaming: false,
       accounts: {
         main: {
           appId: "${FEISHU_APP_ID}",

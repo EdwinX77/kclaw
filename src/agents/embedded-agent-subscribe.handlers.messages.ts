@@ -1035,14 +1035,16 @@ export function handleMessageEnd(
     if (
       hasAssistantVisibleReply({ text: cleanedTextLocal, mediaUrls: mediaUrlsLocal, audioAsVoice })
     ) {
-      ctx.emitBlockReply({
-        text: cleanedTextLocal,
-        mediaUrls: mediaUrlsLocal?.length ? mediaUrlsLocal : undefined,
-        audioAsVoice,
-        replyToId,
-        replyToTag,
-        replyToCurrent,
-      });
+      ctx.emitBlockReply(
+        consumePendingToolMediaIntoReply(ctx.state, {
+          text: cleanedTextLocal,
+          mediaUrls: mediaUrlsLocal?.length ? mediaUrlsLocal : undefined,
+          audioAsVoice,
+          replyToId,
+          replyToTag,
+          replyToCurrent,
+        }),
+      );
     }
   };
 

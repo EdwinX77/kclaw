@@ -5,7 +5,7 @@ import { parseFeishuMessageEvent, type FeishuMessageEvent } from "./bot.js";
 // Helper to build a minimal FeishuMessageEvent for testing
 function makeEvent(
   chatType: "p2p" | "group" | "private",
-  mentions?: Array<{ key: string; name: string; id: { open_id?: string } }>,
+  mentions?: Array<{ key: string; name: string; id: { open_id?: string; user_id?: string } }>,
   text = "hello",
 ): FeishuMessageEvent {
   return {
@@ -83,6 +83,33 @@ describe("parseFeishuMessageEvent – mentionedBot", () => {
     ]);
     const ctx = parseFeishuMessageEvent(event, BOT_OPEN_ID, "OpenClaw Bot");
     expect(ctx.mentionedBot).toBe(true);
+  });
+
+  it("returns mentionedBot=true when Feishu omits open_id but mention name matches botName", () => {
+    const event = makeEvent(
+      "group",
+      [{ key: "@_bot_1", name: "Tas", id: { user_id: "u_bot_only" } }],
+      "@_bot_1 请给我下今年以来凤凰航运的chan图",
+    );
+    const ctx = parseFeishuMessageEvent(event, BOT_OPEN_ID, "Tas");
+
+    expect(ctx.mentionedBot).toBe(true);
+    expect(ctx.content).toBe("请给我下今年以来凤凰航运的chan图");
+  });
+
+  it("returns mentionedBot=true for a leading plain-text bot name mention", () => {
+    const event = makeEvent("group", [], "@Tas 请给我下今年以来凤凰航运的chan图");
+    const ctx = parseFeishuMessageEvent(event, BOT_OPEN_ID, "Tas");
+
+    expect(ctx.mentionedBot).toBe(true);
+    expect(ctx.content).toBe("@Tas 请给我下今年以来凤凰航运的chan图");
+  });
+
+  it("does not treat non-leading plain-text bot names as routing mentions", () => {
+    const event = makeEvent("group", [], "这句话提到 @Tas 但不是路由前缀");
+    const ctx = parseFeishuMessageEvent(event, BOT_OPEN_ID, "Tas");
+
+    expect(ctx.mentionedBot).toBe(false);
   });
 
   it("returns mentionedBot=false when only other users are mentioned", () => {

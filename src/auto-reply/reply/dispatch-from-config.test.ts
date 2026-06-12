@@ -6922,6 +6922,49 @@ describe("before_dispatch hook", () => {
     expect(result.queuedFinal).toBe(true);
   });
 
+  it("starts reply lifecycle before running before_dispatch hooks", async () => {
+    const onReplyStart = vi.fn(async () => {});
+    hookMocks.runner.runBeforeDispatch.mockImplementation(async () => {
+      expect(onReplyStart).toHaveBeenCalledTimes(1);
+      return { handled: true, text: "Blocked" };
+    });
+    const dispatcher = createDispatcher();
+    await dispatchReplyFromConfig({
+      ctx: createHookCtx(),
+      cfg: emptyConfig,
+      dispatcher,
+      replyOptions: { onReplyStart },
+    });
+
+    expect(onReplyStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends before_dispatch reply payloads without model dispatch", async () => {
+    hookMocks.runner.runBeforeDispatch.mockResolvedValue({
+      handled: true,
+      reply: {
+        text: "东方电气 Chan 走势图已生成。",
+        mediaUrls: ["http://charts.pattern-strategy.local/chart.png"],
+        trustedLocalMedia: true,
+      },
+    });
+    const dispatcher = createDispatcher();
+    const result = await dispatchReplyFromConfig({
+      ctx: createHookCtx(),
+      cfg: emptyConfig,
+      dispatcher,
+      replyResolver: async () => {
+        throw new Error("model path should not run");
+      },
+    });
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledWith({
+      text: "东方电气 Chan 走势图已生成。",
+      mediaUrls: ["http://charts.pattern-strategy.local/chart.png"],
+      trustedLocalMedia: true,
+    });
+    expect(result.queuedFinal).toBe(true);
+  });
+
   it("silently short-circuits when hook returns handled without text", async () => {
     hookMocks.runner.runBeforeDispatch.mockResolvedValue({ handled: true });
     const dispatcher = createDispatcher();

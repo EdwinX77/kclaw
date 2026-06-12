@@ -1,6 +1,7 @@
 // Feishu plugin module implements monitor.message handler behavior.
 import { isRecord, readStringValue as readString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { ClawdbotConfig, HistoryEntry, PluginRuntime, RuntimeEnv } from "../runtime-api.js";
+import { isFeishuBotMention } from "./bot-content.js";
 import { resolveFeishuMessageDedupeKey } from "./dedupe-key.js";
 import type { FeishuMessageEvent } from "./event-types.js";
 import { isMentionForwardRequest } from "./mention.js";
@@ -129,8 +130,9 @@ function dedupeFeishuDebounceEntriesByDedupeKey(
 function resolveFeishuDebounceMentions(params: {
   entries: FeishuMessageEvent[];
   botOpenId?: string;
+  botName?: string;
 }): FeishuMessageEvent["message"]["mentions"] | undefined {
-  const { entries, botOpenId } = params;
+  const { entries, botOpenId, botName } = params;
   if (entries.length === 0) {
     return undefined;
   }
@@ -144,12 +146,11 @@ function resolveFeishuDebounceMentions(params: {
   if (!merged) {
     return undefined;
   }
-  const normalizedBotOpenId = botOpenId?.trim();
-  if (!normalizedBotOpenId) {
+  if (!botOpenId?.trim() && !botName?.trim()) {
     return undefined;
   }
-  const botMentions = merged.filter(
-    (mention) => mention.id.open_id?.trim() === normalizedBotOpenId,
+  const botMentions = merged.filter((mention) =>
+    isFeishuBotMention(mention, { botOpenId, botName }),
   );
   return botMentions.length > 0 ? botMentions : undefined;
 }
@@ -291,6 +292,7 @@ export function createFeishuMessageReceiveHandler({
       const mergedMentions = resolveFeishuDebounceMentions({
         entries: freshEntries,
         botOpenId: getBotOpenId(accountId),
+        botName: getBotName(accountId),
       });
       await dispatchFeishuMessage({
         ...dispatchEntry,

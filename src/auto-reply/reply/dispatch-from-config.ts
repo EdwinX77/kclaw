@@ -2115,8 +2115,18 @@ export async function dispatchReplyFromConfig(
       };
     };
 
+    let replyLifecycleStarted = false;
+    const startReplyLifecycle = async () => {
+      if (replyLifecycleStarted) {
+        return;
+      }
+      replyLifecycleStarted = true;
+      await params.replyOptions?.onReplyStart?.();
+    };
+
     // Run before_dispatch hook — let plugins inspect or handle before model dispatch.
     if (hookRunner?.hasHooks("before_dispatch")) {
+      await startReplyLifecycle();
       const beforeDispatchResult = await traceReplyPhase("reply.before_dispatch_hooks", () =>
         runWithDispatchAbortSignal(getPreDispatchAbortSignal(), () =>
           hookRunner.runBeforeDispatch(
@@ -2146,14 +2156,15 @@ export async function dispatchReplyFromConfig(
         ),
       );
       if (beforeDispatchResult?.handled) {
-        const text = beforeDispatchResult.text;
+        const reply =
+          beforeDispatchResult.reply ??
+          (beforeDispatchResult.text ? { text: beforeDispatchResult.text } : undefined);
         let queuedFinal = false;
         let routedFinalCount = 0;
-        if (text && !suppressDelivery) {
-          const handledReply = await sendFinalPayload(
-            { text },
-            { abortSignal: getPreDispatchAbortSignal() },
-          );
+        if (reply && !suppressDelivery) {
+          const handledReply = await sendFinalPayload(reply, {
+            abortSignal: getPreDispatchAbortSignal(),
+          });
           queuedFinal = handledReply.queuedFinal;
           routedFinalCount += handledReply.routedFinalCount;
         }
@@ -2195,7 +2206,7 @@ export async function dispatchReplyFromConfig(
               cfg,
               dispatcher: dispatchHookDispatcher,
               abortSignal: getPreDispatchAbortSignal() ?? params.replyOptions?.abortSignal,
-              onReplyStart: params.replyOptions?.onReplyStart,
+              onReplyStart: startReplyLifecycle,
               recordProcessed,
               markIdle,
             },
@@ -2846,7 +2857,7 @@ export async function dispatchReplyFromConfig(
               cfg,
               dispatcher: dispatchHookDispatcher,
               abortSignal: getPreDispatchAbortSignal() ?? params.replyOptions?.abortSignal,
-              onReplyStart: params.replyOptions?.onReplyStart,
+              onReplyStart: startReplyLifecycle,
               recordProcessed,
               markIdle,
             },

@@ -6,10 +6,31 @@ import {
   copyReplyPayloadMetadata,
   getReplyPayloadMetadata,
 } from "../../../auto-reply/reply-payload.js";
+import { isCoreToolResultMediaTrustedName } from "../../embedded-agent-subscribe.tools.js";
+import { normalizeToolName } from "../../tool-policy.js";
 import type { EmbeddedAgentRunResult } from "../types.js";
 
 /** Channel payload shape produced by embedded runs after auto-reply normalization. */
 type EmbeddedRunPayload = NonNullable<EmbeddedAgentRunResult["payloads"]>[number];
+
+/** Collects exact raw tool names allowed to pass local media paths for this attempt. */
+export function collectTrustedLocalMediaToolNames<TTool extends { name?: string }>(params: {
+  tools: readonly TTool[];
+  toolMeta?: (tool: TTool) => { trustedLocalMedia?: boolean } | undefined;
+}): Set<string> {
+  return new Set(
+    params.tools.flatMap((tool) => {
+      const name = (tool.name ?? "").trim();
+      if (!name) {
+        return [];
+      }
+      const coreToolName =
+        normalizeToolName(name) === name && isCoreToolResultMediaTrustedName(name);
+      const pluginToolName = params.toolMeta?.(tool)?.trustedLocalMedia === true;
+      return coreToolName || pluginToolName ? [name] : [];
+    }),
+  );
+}
 
 /**
  * Merges media emitted by tools into the channel payloads produced by the

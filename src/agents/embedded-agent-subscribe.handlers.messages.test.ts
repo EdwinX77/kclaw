@@ -152,6 +152,9 @@ function createMessageEndContext(
       lastStreamedAssistantCleaned: undefined,
       lastReasoningSent: undefined,
       reasoningStreamOpen: false,
+      pendingToolMediaUrls: [],
+      pendingToolAudioAsVoice: false,
+      pendingToolTrustedLocalMedia: false,
       ...params.state,
     },
     noteLastAssistant: vi.fn(),
@@ -1227,6 +1230,40 @@ describe("handleMessageEnd", () => {
       text: "",
       mediaUrls: ["/tmp/final.png"],
     });
+  });
+
+  it("attaches pending tool media to message_end final replies", () => {
+    const emitBlockReply = vi.fn();
+    const ctx = createMessageEndContext({
+      emitBlockReply,
+      consumeReplyDirectives: vi.fn((text: string) => (text ? { text } : null)),
+      state: {
+        emittedAssistantUpdate: true,
+        lastStreamedAssistantCleaned: "已生成。",
+        blockReplyBreak: "message_end",
+        deltaBuffer: "已生成。",
+        blockBuffer: "已生成。",
+        pendingToolMediaUrls: ["/tmp/openclaw/pattern-chan/charts/chart.png"],
+        pendingToolAudioAsVoice: false,
+        pendingToolTrustedLocalMedia: true,
+      },
+    });
+
+    void handleMessageEnd(ctx, {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "已生成。" }],
+        usage: { input: 10, output: 5, total: 15 },
+      },
+    } as never);
+
+    expect(firstMockArg(emitBlockReply, "block reply")).toMatchObject({
+      text: "已生成。",
+      mediaUrls: ["/tmp/openclaw/pattern-chan/charts/chart.png"],
+      trustedLocalMedia: true,
+    });
+    expect(ctx.state.pendingToolMediaUrls).toStrictEqual([]);
   });
 
   it("emits a replacement final assistant event when final_answer appears only at message_end", () => {

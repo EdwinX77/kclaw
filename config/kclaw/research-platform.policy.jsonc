@@ -1,0 +1,110 @@
+{
+  "mcp": {
+    "servers": {
+      "allow": [
+        "pattern-strategy",
+        "pattern-quotation",
+        "market-data",
+        "chart-artifacts",
+        "research-memory"
+      ],
+      "deny": ["untrusted"]
+    }
+  },
+  "models": {
+    "providers": {
+      "allow": ["openai", "deepseek"],
+      "deny": ["openrouter"]
+    }
+  },
+  "network": {
+    "privateNetwork": {
+      "allow": false
+    }
+  },
+  "ingress": {
+    "session": {
+      "requireDmScope": "per-channel-peer"
+    },
+    "channels": {
+      "allowDmPolicies": ["pairing", "allowlist", "disabled"],
+      "denyOpenGroups": true,
+      "requireMentionInGroups": true
+    }
+  },
+  "gateway": {
+    "exposure": {
+      "allowNonLoopbackBind": true,
+      "allowTailscaleFunnel": false
+    },
+    "remote": {
+      "allow": false
+    }
+  },
+  "tools": {
+    "fs": {
+      "requireWorkspaceOnly": true
+    },
+    "exec": {
+      "allowSecurity": ["deny", "allowlist"],
+      "requireAsk": ["always"],
+      "allowHosts": ["sandbox"]
+    },
+    "elevated": {
+      "allow": false
+    },
+    "denyTools": ["exec", "process", "write", "edit", "apply_patch"]
+  },
+  "dataHandling": {
+    "sensitiveLogging": {
+      "requireRedaction": true
+    },
+    "telemetry": {
+      "denyContentCapture": true
+    },
+    "retention": {
+      "requireSessionMaintenance": true
+    },
+    "memory": {
+      "denySessionTranscriptIndexing": true
+    }
+  },
+  "scopes": {
+    "l0-read-only": {
+      "agentIds": ["market-memory"],
+      "agents": {
+        "workspace": {
+          "allowedAccess": ["none", "ro"],
+          "denyTools": ["exec", "process", "write", "edit", "apply_patch"]
+        }
+      }
+    },
+    "l1-analysis": {
+      "agentIds": ["market-research"],
+      "agents": {
+        "workspace": {
+          "allowedAccess": ["ro"],
+          "denyTools": ["exec", "process", "write", "edit", "apply_patch"]
+        }
+      }
+    },
+    "l2-execution": {
+      "agentIds": ["tas-dispatch", "pattern-strategy"],
+      "agents": {
+        "workspace": {
+          "allowedAccess": ["ro"],
+          "denyTools": ["exec", "process", "write", "edit", "apply_patch"]
+        }
+      }
+    },
+    "l3-admin": {
+      "agentIds": ["ops-guard"],
+      "agents": {
+        "workspace": {
+          "allowedAccess": ["none"],
+          "denyTools": ["exec", "process", "write", "edit", "apply_patch"]
+        }
+      }
+    }
+  }
+}

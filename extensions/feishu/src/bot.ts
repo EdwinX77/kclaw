@@ -31,7 +31,7 @@ import { resolvePinnedMainDmOwnerFromAllowlist } from "openclaw/plugin-sdk/secur
 import { normalizeOptionalString, uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveFeishuRuntimeAccount } from "./accounts.js";
 import {
-  checkBotMentioned,
+  checkBotMentionedByIdentity,
   normalizeFeishuCommandProbeBody,
   normalizeMentions,
   parseMergeForwardContent,
@@ -282,17 +282,17 @@ export function buildBroadcastSessionKey(
 export function parseFeishuMessageEvent(
   event: FeishuMessageEvent,
   botOpenId?: string,
-  _botName?: string,
+  botName?: string,
 ): FeishuMessageContext {
   const rawContent = parseMessageContent(event.message.content, event.message.message_type);
-  const mentionedBot = checkBotMentioned(event, botOpenId);
+  const mentionedBot = checkBotMentionedByIdentity(event, { botOpenId, botName });
   const hasAnyMention = (event.message.mentions?.length ?? 0) > 0;
   // Strip the bot's own mention so slash commands like @Bot /help retain
   // the leading /. This applies in both p2p *and* group contexts — the
   // mentionedBot flag already captures whether the bot was addressed, so
   // keeping the mention tag in content only breaks command detection (#35994).
   // Non-bot mentions (e.g. mention-forward targets) are still normalized to <at> tags.
-  const content = normalizeMentions(rawContent, event.message.mentions, botOpenId);
+  const content = normalizeMentions(rawContent, event.message.mentions, botOpenId, botName);
   const senderOpenId = event.sender.sender_id.open_id?.trim();
   const senderUserId = event.sender.sender_id.user_id?.trim();
   const senderFallbackId = senderOpenId || senderUserId || "";

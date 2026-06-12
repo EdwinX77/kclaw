@@ -2,6 +2,17 @@
   "id": "pattern-quotation",
   "name": "Pattern Quotation",
   "description": "MCP sub-service for Pattern market quotation and information refresh. Exposes fixed refresh/status actions; Strategy remains the primary Pattern MCP service.",
+  "contracts": {
+    "tools": [
+      "quotation_get_watch",
+      "quotation_list_watches",
+      "quotation_refresh_chain",
+      "quotation_refresh_errors",
+      "quotation_refresh_get",
+      "quotation_unwatch_refresh",
+      "quotation_watch_refresh"
+    ]
+  },
   "skills": ["./skills"],
   "configSchema": {
     "type": "object",

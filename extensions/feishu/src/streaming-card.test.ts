@@ -115,12 +115,14 @@ describe("FeishuStreamingSession", () => {
 
   function mockStreamingTokenStart(resolveAuthJson: (token: string) => Record<string, unknown>): {
     authTokens: string[];
+    cardCreateBodies: string[];
     client: ConstructorParameters<typeof FeishuStreamingSession>[0];
   } {
     const release = vi.fn(async () => {});
     const authTokens: string[] = [];
+    const cardCreateBodies: string[] = [];
     fetchWithSsrFGuardMock.mockImplementation(
-      async ({ url }: { url: string; init?: { body?: string } }) => {
+      async ({ url, init }: { url: string; init?: { body?: string } }) => {
         if (url.includes("/auth/")) {
           const token = `token-${authTokens.length + 1}`;
           authTokens.push(token);
@@ -129,6 +131,7 @@ describe("FeishuStreamingSession", () => {
             release,
           };
         }
+        cardCreateBodies.push(init?.body ?? "");
         return {
           response: {
             ok: true,
@@ -149,8 +152,32 @@ describe("FeishuStreamingSession", () => {
         },
       },
     } as unknown as ConstructorParameters<typeof FeishuStreamingSession>[0];
-    return { authTokens, client };
+    return { authTokens, cardCreateBodies, client };
   }
+
+  it("uses chunked client-side card printing instead of single-character output", async () => {
+    const { cardCreateBodies, client } = mockStreamingTokenStart(() => ({
+      code: 0,
+      msg: "ok",
+      tenant_access_token: "token",
+      expire: 7200,
+    }));
+
+    await new FeishuStreamingSession(client, {
+      appId: "app_streaming_card_print_step",
+      appSecret: "secret",
+    }).start("chat_id", "open_id");
+
+    expect(cardCreateBodies).toHaveLength(1);
+    const createBody = JSON.parse(cardCreateBodies[0] ?? "{}") as { data?: string };
+    const cardJson = JSON.parse(createBody.data ?? "{}") as {
+      config?: { streaming_config?: unknown };
+    };
+    expect(cardJson.config?.streaming_config).toEqual({
+      print_frequency_ms: { default: 50 },
+      print_step: { default: 2 },
+    });
+  });
 
   it("flushes throttled pending text after the throttle window", async () => {
     vi.useFakeTimers();

@@ -1,7 +1,29 @@
 services:
   openclaw-gateway:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
-    build: .
+    build:
+      context: .
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+      args:
+        HTTP_PROXY: ${OPENCLAW_DOCKER_BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${OPENCLAW_DOCKER_BUILD_HTTPS_PROXY:-}
+        ALL_PROXY: ${OPENCLAW_DOCKER_BUILD_ALL_PROXY:-}
+        NO_PROXY: ${OPENCLAW_DOCKER_BUILD_NO_PROXY:-localhost,127.0.0.1,::1,host.docker.internal,openclaw-gateway,openclaw-cli,mirrors.ustc.edu.cn,npmreg.proxy.ustclug.org}
+        http_proxy: ${OPENCLAW_DOCKER_BUILD_HTTP_PROXY:-}
+        https_proxy: ${OPENCLAW_DOCKER_BUILD_HTTPS_PROXY:-}
+        all_proxy: ${OPENCLAW_DOCKER_BUILD_ALL_PROXY:-}
+        no_proxy: ${OPENCLAW_DOCKER_BUILD_NO_PROXY:-localhost,127.0.0.1,::1,host.docker.internal,openclaw-gateway,openclaw-cli,mirrors.ustc.edu.cn,npmreg.proxy.ustclug.org}
+        OPENCLAW_NPM_REGISTRY: ${OPENCLAW_NPM_REGISTRY:-}
+        OPENCLAW_COREPACK_NPM_REGISTRY: ${OPENCLAW_COREPACK_NPM_REGISTRY:-}
+        OPENCLAW_APT_MIRROR: ${OPENCLAW_APT_MIRROR:-}
+        OPENCLAW_APT_SECURITY_MIRROR: ${OPENCLAW_APT_SECURITY_MIRROR:-}
+        OPENCLAW_PNPM_NETWORK_CONCURRENCY: ${OPENCLAW_PNPM_NETWORK_CONCURRENCY:-4}
+        OPENCLAW_PNPM_CHILD_CONCURRENCY: ${OPENCLAW_PNPM_CHILD_CONCURRENCY:-1}
+        OPENCLAW_PNPM_FETCH_TIMEOUT: ${OPENCLAW_PNPM_FETCH_TIMEOUT:-600000}
+        OPENCLAW_PNPM_FETCH_RETRIES: ${OPENCLAW_PNPM_FETCH_RETRIES:-5}
+        OPENCLAW_PNPM_FETCH_RETRY_MINTIMEOUT: ${OPENCLAW_PNPM_FETCH_RETRY_MINTIMEOUT:-10000}
+        OPENCLAW_PNPM_FETCH_RETRY_MAXTIMEOUT: ${OPENCLAW_PNPM_FETCH_RETRY_MAXTIMEOUT:-60000}
     env_file:
       - path: .env
         required: false
@@ -19,6 +41,10 @@ services:
       OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
       OPENCLAW_CONFIG_DIR: /home/node/.openclaw
       OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      # Host .env publishes OPENCLAW_GATEWAY_PORT on the WSL/host side.
+      # Inside the gateway container, CLI probes must use the container port.
+      OPENCLAW_GATEWAY_PORT: 18789
+      OPENCLAW_GATEWAY_URL: http://127.0.0.1:18789
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
       OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
       # Empty means auto: Bonjour disables itself in detected containers.
@@ -34,6 +60,14 @@ services:
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-}
       OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-}
       OPENCLAW_OTEL_PRELOADED: ${OPENCLAW_OTEL_PRELOADED:-}
+      HTTP_PROXY: ${OPENCLAW_RUNTIME_HTTP_PROXY:-}
+      HTTPS_PROXY: ${OPENCLAW_RUNTIME_HTTPS_PROXY:-}
+      ALL_PROXY: ${OPENCLAW_RUNTIME_ALL_PROXY:-}
+      NO_PROXY: ${OPENCLAW_RUNTIME_NO_PROXY:-localhost,127.0.0.1,::1,host.docker.internal,openclaw-gateway,openclaw-cli}
+      http_proxy: ${OPENCLAW_RUNTIME_HTTP_PROXY:-}
+      https_proxy: ${OPENCLAW_RUNTIME_HTTPS_PROXY:-}
+      all_proxy: ${OPENCLAW_RUNTIME_ALL_PROXY:-}
+      no_proxy: ${OPENCLAW_RUNTIME_NO_PROXY:-localhost,127.0.0.1,::1,host.docker.internal,openclaw-gateway,openclaw-cli}
       CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY:-}
       CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
       CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
@@ -41,6 +75,7 @@ services:
     volumes:
       - "${OPENCLAW_CONFIG_DIR:-${HOME:-/tmp}/.openclaw}:/home/node/.openclaw"
       - "${OPENCLAW_WORKSPACE_DIR:-${HOME:-/tmp}/.openclaw/workspace}:/home/node/.openclaw/workspace"
+      - "${KCLAW_DEV_WORKSPACE_DIR:-./.runtime/openclaw/workspace/kclaw-dev}:/home/node/.openclaw/workspace/kclaw-dev"
       - "${OPENCLAW_AUTH_PROFILE_SECRET_DIR:-${HOME:-/tmp}/.openclaw-auth-profile-secrets}:/home/node/.config/openclaw"
       ## Uncomment the lines below to enable sandbox isolation
       ## (agents.defaults.sandbox). Requires Docker CLI in the image
@@ -110,9 +145,20 @@ services:
       OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
       OPENCLAW_CONFIG_DIR: /home/node/.openclaw
       OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      # The CLI shares the gateway network namespace, so it must target the
+      # container-side port even when the host publishes a different port.
+      OPENCLAW_GATEWAY_URL: ${OPENCLAW_CLI_GATEWAY_URL:-http://127.0.0.1:18789}
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
       OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
       BROWSER: echo
+      HTTP_PROXY: ${OPENCLAW_RUNTIME_HTTP_PROXY:-}
+      HTTPS_PROXY: ${OPENCLAW_RUNTIME_HTTPS_PROXY:-}
+      ALL_PROXY: ${OPENCLAW_RUNTIME_ALL_PROXY:-}
+      NO_PROXY: ${OPENCLAW_RUNTIME_NO_PROXY:-localhost,127.0.0.1,::1,host.docker.internal,openclaw-gateway,openclaw-cli}
+      http_proxy: ${OPENCLAW_RUNTIME_HTTP_PROXY:-}
+      https_proxy: ${OPENCLAW_RUNTIME_HTTPS_PROXY:-}
+      all_proxy: ${OPENCLAW_RUNTIME_ALL_PROXY:-}
+      no_proxy: ${OPENCLAW_RUNTIME_NO_PROXY:-localhost,127.0.0.1,::1,host.docker.internal,openclaw-gateway,openclaw-cli}
       CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY:-}
       CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
       CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
@@ -120,6 +166,7 @@ services:
     volumes:
       - "${OPENCLAW_CONFIG_DIR:-${HOME:-/tmp}/.openclaw}:/home/node/.openclaw"
       - "${OPENCLAW_WORKSPACE_DIR:-${HOME:-/tmp}/.openclaw/workspace}:/home/node/.openclaw/workspace"
+      - "${KCLAW_DEV_WORKSPACE_DIR:-./.runtime/openclaw/workspace/kclaw-dev}:/home/node/.openclaw/workspace/kclaw-dev"
       - "${OPENCLAW_AUTH_PROFILE_SECRET_DIR:-${HOME:-/tmp}/.openclaw-auth-profile-secrets}:/home/node/.config/openclaw"
     stdin_open: true
     tty: true

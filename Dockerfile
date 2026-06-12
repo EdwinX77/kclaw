@@ -49,11 +49,26 @@ FROM ${OPENCLAW_BUN_IMAGE} AS bun-binary
 FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS build
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR
 ARG OPENCLAW_EXTENSIONS
+# Optional dependency registry for `pnpm install`; Corepack has a separate
+# registry because some npm mirrors do not implement its package/version
+# endpoint.
+ARG OPENCLAW_NPM_REGISTRY=""
+ARG OPENCLAW_COREPACK_NPM_REGISTRY=""
+ARG OPENCLAW_PNPM_NETWORK_CONCURRENCY=4
+ARG OPENCLAW_PNPM_CHILD_CONCURRENCY=1
+ARG OPENCLAW_PNPM_FETCH_TIMEOUT=600000
+ARG OPENCLAW_PNPM_FETCH_RETRIES=5
+ARG OPENCLAW_PNPM_FETCH_RETRY_MINTIMEOUT=10000
+ARG OPENCLAW_PNPM_FETCH_RETRY_MAXTIMEOUT=60000
 
 # Copy pinned Bun binary from the official image instead of fetching via curl.
 COPY --from=bun-binary /usr/local/bin/bun /usr/local/bin/bun
 
-RUN corepack enable
+RUN corepack_registry="${OPENCLAW_COREPACK_NPM_REGISTRY%/}"; \
+    if [ -n "$corepack_registry" ]; then \
+      export COREPACK_NPM_REGISTRY="$corepack_registry"; \
+    fi; \
+    corepack enable
 
 WORKDIR /app
 
@@ -62,7 +77,9 @@ COPY openclaw.mjs ./
 COPY ui/package.json ./ui/package.json
 COPY patches ./patches
 COPY scripts/postinstall-bundled-plugins.mjs scripts/preinstall-package-manager-warning.mjs scripts/npm-runner.mjs scripts/windows-cmd-helpers.mjs scripts/prepare-git-hooks.mjs ./scripts/
+COPY scripts/docker/alias-pnpm-tarball-store.mjs ./scripts/docker/alias-pnpm-tarball-store.mjs
 COPY scripts/lib/package-dist-imports.mjs ./scripts/lib/package-dist-imports.mjs
+COPY docker-build-cache/npm-tarballs/ ./docker-build-cache/npm-tarballs/
 
 COPY --from=workspace-deps /out/packages/ ./packages/
 COPY --from=workspace-deps /out/${OPENCLAW_BUNDLED_PLUGIN_DIR}/ ./${OPENCLAW_BUNDLED_PLUGIN_DIR}/
@@ -70,7 +87,32 @@ COPY --from=workspace-deps /out/${OPENCLAW_BUNDLED_PLUGIN_DIR}/ ./${OPENCLAW_BUN
 # Reduce OOM risk on low-memory hosts during dependency installation.
 # Docker builds on small VMs may otherwise fail with "Killed" (exit 137).
 RUN --mount=type=cache,id=openclaw-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
+    corepack_registry="${OPENCLAW_COREPACK_NPM_REGISTRY%/}"; \
+    if [ -n "$corepack_registry" ]; then \
+      export COREPACK_NPM_REGISTRY="$corepack_registry"; \
+    fi; \
+    npm_registry="${OPENCLAW_NPM_REGISTRY%/}"; \
+    registry_config=""; \
+    if [ -n "$npm_registry" ]; then \
+      registry_config="--config.registry=$npm_registry"; \
+    fi; \
+    store_path="$(pnpm store path)"; \
+    for tarball in /app/docker-build-cache/npm-tarballs/*.tgz /app/docker-build-cache/npm-tarballs/*.tar.gz; do \
+      [ -f "$tarball" ] || continue; \
+      pnpm store add "$tarball" \
+        --config.supportedArchitectures.os=linux \
+        --config.supportedArchitectures.cpu="$(node -p 'process.arch')" \
+        --config.supportedArchitectures.libc=glibc; \
+      NODE_NO_WARNINGS=1 node scripts/docker/alias-pnpm-tarball-store.mjs "$store_path" "$tarball"; \
+    done; \
     NODE_OPTIONS=--max-old-space-size=2048 pnpm install --frozen-lockfile \
+      $registry_config \
+      --network-concurrency="$OPENCLAW_PNPM_NETWORK_CONCURRENCY" \
+      --child-concurrency="$OPENCLAW_PNPM_CHILD_CONCURRENCY" \
+      --fetch-timeout="$OPENCLAW_PNPM_FETCH_TIMEOUT" \
+      --fetch-retries="$OPENCLAW_PNPM_FETCH_RETRIES" \
+      --fetch-retry-mintimeout="$OPENCLAW_PNPM_FETCH_RETRY_MINTIMEOUT" \
+      --fetch-retry-maxtimeout="$OPENCLAW_PNPM_FETCH_RETRY_MAXTIMEOUT" \
       --config.supportedArchitectures.os=linux \
       --config.supportedArchitectures.cpu="$(node -p 'process.arch')" \
       --config.supportedArchitectures.libc=glibc
@@ -150,6 +192,9 @@ LABEL org.opencontainers.image.base.name="docker.io/library/node:24-bookworm-sli
 # ── Stage 3: Runtime ────────────────────────────────────────────
 FROM base-runtime
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR
+ARG OPENCLAW_COREPACK_NPM_REGISTRY=""
+ARG OPENCLAW_APT_MIRROR=""
+ARG OPENCLAW_APT_SECURITY_MIRROR=""
 
 # OCI base-image metadata for downstream image consumers.
 # If you change these annotations, also update:
@@ -163,6 +208,39 @@ LABEL org.opencontainers.image.source="https://github.com/openclaw/openclaw" \
   org.opencontainers.image.description="OpenClaw gateway and CLI runtime container image"
 
 WORKDIR /app
+
+RUN mirror="$OPENCLAW_APT_MIRROR"; \
+    security_mirror="$OPENCLAW_APT_SECURITY_MIRROR"; \
+    if [ -n "$mirror" ] || [ -n "$security_mirror" ]; then \
+      mirror="${mirror:-http://deb.debian.org/debian}"; \
+      security_mirror="${security_mirror:-$mirror-security}"; \
+      for file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+        [ -f "$file" ] || continue; \
+        sed -i \
+          -e "s|http://security.debian.org/debian-security|$security_mirror|g" \
+          -e "s|https://security.debian.org/debian-security|$security_mirror|g" \
+          -e "s|http://deb.debian.org/debian-security|$security_mirror|g" \
+          -e "s|https://deb.debian.org/debian-security|$security_mirror|g" \
+          -e "s|http://deb.debian.org/debian|$mirror|g" \
+          -e "s|https://deb.debian.org/debian|$mirror|g" \
+          "$file"; \
+      done; \
+      if [ -z "${HTTP_PROXY:-}${http_proxy:-}${HTTPS_PROXY:-}${https_proxy:-}" ]; then \
+        : > /etc/apt/apt.conf.d/99openclaw-direct-mirrors; \
+        for url in "$mirror" "$security_mirror"; do \
+          host="${url#*://}"; \
+          host="${host%%/*}"; \
+          [ -n "$host" ] || continue; \
+          printf 'Acquire::http::Proxy::%s "DIRECT";\n' "$host" >> /etc/apt/apt.conf.d/99openclaw-direct-mirrors; \
+          printf 'Acquire::https::Proxy::%s "DIRECT";\n' "$host" >> /etc/apt/apt.conf.d/99openclaw-direct-mirrors; \
+        done; \
+      fi; \
+    fi; \
+    { \
+      printf 'Acquire::Retries "8";\n'; \
+      printf 'Acquire::http::Timeout "60";\n'; \
+      printf 'Acquire::https::Timeout "60";\n'; \
+    } > /etc/apt/apt.conf.d/80openclaw-retries
 
 # Install runtime system utilities missing from bookworm-slim.
 # `ca-certificates` ships in `bookworm` (full) but not in `bookworm-slim`,
@@ -195,6 +273,10 @@ COPY --from=runtime-assets --chown=node:node /app/qa ./qa
 # first-run network fetch when invoking pnpm.
 ENV COREPACK_HOME=/usr/local/share/corepack
 RUN install -d -m 0755 "$COREPACK_HOME" && \
+    corepack_registry="${OPENCLAW_COREPACK_NPM_REGISTRY%/}" && \
+    if [ -n "$corepack_registry" ]; then \
+      export COREPACK_NPM_REGISTRY="$corepack_registry"; \
+    fi; \
     corepack enable && \
     for attempt in 1 2 3 4 5; do \
       if corepack prepare "$(node -p "require('./package.json').packageManager")" --activate; then \

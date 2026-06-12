@@ -1,0 +1,381 @@
+// KClaw securities research platform template.
+// Copy or merge selected blocks into the isolated KClaw openclaw.json only
+// after config/kclaw/docker.env.example has been copied to .env for KClaw.
+// Do not copy MyClaw state, sessions, auth stores, pairing files, cron DBs, or
+// plugin runtime state into KClaw.
+{
+  skills: {
+    load: {
+      // Repo skills plus plugin-provided skills. Keep this path container-side
+      // when running through docker-compose.yml.
+      extraDirs: ["/app/skills"],
+    },
+  },
+
+  plugins: {
+    allow: ["telegram", "feishu", "pattern-strategy", "pattern-quotation", "policy"],
+    entries: {
+      telegram: { enabled: true },
+      feishu: { enabled: true },
+      "pattern-strategy": {
+        enabled: true,
+        config: {
+          baseUrl: "http://host.docker.internal:18080",
+          chartBaseUrl: "http://host.docker.internal:18000",
+          timeoutMs: 30000,
+          asyncPollSeconds: 60,
+          tradingPrinciples: [
+            "以研究、回测、信号评价和风险复盘为主，不直接下达真实交易指令。",
+            "低流动性、小市值、低价和异常波动标的必须单独标注风险。",
+            "任何执行建议必须区分策略信号、人工判断、市场环境和未验证假设。",
+          ],
+        },
+      },
+      "pattern-quotation": {
+        enabled: true,
+        config: {
+          baseUrl: "http://host.docker.internal:18080",
+          timeoutMs: 30000,
+        },
+      },
+      policy: { enabled: true },
+    },
+  },
+
+  channels: {
+    telegram: {
+      // Fill TELEGRAM_BOT_TOKEN in the gateway environment before enabling live traffic.
+      enabled: false,
+      botToken: "${TELEGRAM_BOT_TOKEN}",
+      dmPolicy: "allowlist",
+      allowFrom: ["<telegram-user-id>"],
+      groupPolicy: "allowlist",
+      groups: {
+        "<telegram-group-id>": {
+          requireMention: true,
+        },
+      },
+    },
+
+    feishu: {
+      // Fill FEISHU_APP_ID / FEISHU_APP_SECRET in the gateway environment before enabling live traffic.
+      enabled: false,
+      // Keep live chat efficient: only explicit Feishu cards such as strategy signal tables render as cards.
+      renderMode: "raw",
+      streaming: false,
+      blockStreaming: false,
+      accounts: {
+        main: {
+          appId: "${FEISHU_APP_ID}",
+          appSecret: "${FEISHU_APP_SECRET}",
+        },
+      },
+      dmPolicy: "allowlist",
+      allowFrom: ["<feishu-open-id>"],
+      groupPolicy: "allowlist",
+      groupAllowFrom: ["<feishu-chat-id>"],
+      groups: {
+        "<feishu-chat-id>": {
+          enabled: true,
+          requireMention: true,
+          allowFrom: ["<feishu-open-id>"],
+        },
+      },
+    },
+  },
+
+  hooks: {
+    gmail: {
+      // Gmail is a hook/automation input, not a normal channel binding.
+      account: "default",
+      label: "KClaw-DailyReview",
+      includeBody: false,
+      maxBytes: 50000,
+      allowUnsafeExternalContent: false,
+      model: "deepseek/deepseek-v4-pro",
+      thinking: "medium",
+    },
+    internal: {
+      enabled: true,
+      entries: {
+        "session-memory": {
+          enabled: true,
+          messages: 20,
+          llmSlug: true,
+        },
+      },
+    },
+  },
+
+  mcp: {
+    servers: {
+      // Disabled until the backing services are installed and validated.
+      "pattern-strategy": {
+        enabled: false,
+        url: "http://host.docker.internal:18080/mcp",
+        transport: "streamable-http",
+        requestTimeoutMs: 30000,
+        toolFilter: {
+          include: ["strategy.*", "factor.*", "indice.*", "chan.*"],
+        },
+      },
+      "pattern-quotation": {
+        enabled: false,
+        url: "http://host.docker.internal:18080/quotation-mcp",
+        transport: "streamable-http",
+        requestTimeoutMs: 30000,
+        toolFilter: {
+          include: ["quotation.*", "market.*"],
+        },
+      },
+      "market-data": {
+        enabled: false,
+        url: "http://host.docker.internal:18081/mcp",
+        transport: "streamable-http",
+        requestTimeoutMs: 30000,
+      },
+      "chart-artifacts": {
+        enabled: false,
+        url: "http://host.docker.internal:18000/mcp",
+        transport: "streamable-http",
+        requestTimeoutMs: 30000,
+      },
+      "research-memory": {
+        enabled: false,
+        url: "http://host.docker.internal:18082/mcp",
+        transport: "streamable-http",
+        requestTimeoutMs: 30000,
+      },
+    },
+  },
+
+  agents: {
+    defaults: {
+      model: {
+        primary: "deepseek/deepseek-v4-pro",
+      },
+      models: {
+        "deepseek/*": {
+          agentRuntime: {
+            id: "openclaw",
+          },
+        },
+      },
+      sandbox: {
+        mode: "all",
+        scope: "agent",
+        workspaceAccess: "ro",
+      },
+      skipBootstrap: false,
+      skills: [],
+    },
+    list: [
+      {
+        id: "tas-dispatch",
+        name: "TAS Dispatch",
+        description: "总调度 / 项目经理，负责分派研究、策略、记忆和复盘任务。",
+        default: true,
+        thinkingDefault: "off",
+        fastModeDefault: true,
+        workspace: "/home/node/.openclaw/workspace/tas-dispatch",
+        agentDir: "/home/node/.openclaw/agents/tas-dispatch/agent",
+        skills: [
+          "pattern-strategy-orchestrator",
+          "canslim-enrichment",
+          "strategy-review",
+          "feishu-report-writer",
+          "gmail-daily-review",
+          "agent-skills-context-engineering",
+          "summarize-pro",
+        ],
+        subagents: {
+          allowAgents: ["pattern-strategy", "market-research", "market-memory", "ops-guard"],
+        },
+        tools: {
+          allow: [
+            "read",
+            "agents_list",
+            "sessions_list",
+            "sessions_history",
+            "sessions_send",
+            "sessions_spawn",
+            "session_status",
+            "cron",
+            "telegram",
+            "feishu",
+            "pattern-strategy",
+            "pattern-quotation",
+            "chan_generate_chart",
+            "group:memory",
+            "group:web",
+          ],
+          deny: ["write", "edit", "apply_patch", "exec", "process", "browser", "canvas"],
+        },
+      },
+      {
+        id: "pattern-strategy",
+        name: "Pattern Strategy",
+        description: "策略执行 / 回测 / 信号评价。",
+        workspace: "/home/node/.openclaw/workspace/pattern-strategy",
+        agentDir: "/home/node/.openclaw/agents/pattern-strategy/agent",
+        skills: [
+          "pattern-strategy-core",
+          "pattern-quotation-core",
+          "strategy-review",
+          "etf-flow-monitor",
+          "chan-chart-reader",
+        ],
+        tools: {
+          allow: [
+            "read",
+            "pattern-strategy",
+            "pattern-quotation",
+            "chan_generate_chart",
+            "group:web",
+          ],
+          deny: ["write", "edit", "apply_patch", "exec", "process", "browser", "canvas", "cron"],
+        },
+      },
+      {
+        id: "pattern-quotation",
+        name: "Pattern Quotation",
+        description: "行情资讯 / 两融 / 财报事件刷新。",
+        workspace: "/home/node/.openclaw/workspace/pattern-quotation",
+        agentDir: "/home/node/.openclaw/agents/pattern-quotation/agent",
+        skills: ["pattern-quotation-core"],
+        tools: {
+          allow: ["read", "pattern-quotation"],
+          deny: ["write", "edit", "apply_patch", "exec", "process", "browser", "canvas", "cron"],
+        },
+      },
+      {
+        id: "market-research",
+        name: "Market Research",
+        description: "宏观、行业、主题和舆情研究。",
+        workspace: "/home/node/.openclaw/workspace/market-research",
+        agentDir: "/home/node/.openclaw/agents/market-research/agent",
+        skills: [
+          "macro-mainline-analysis",
+          "etf-flow-monitor",
+          "web-research-assistant",
+          "summarize-pro",
+        ],
+        tools: {
+          allow: ["read", "group:web", "pattern-quotation", "pattern-strategy"],
+          deny: ["write", "edit", "apply_patch", "exec", "process", "browser", "canvas", "cron"],
+        },
+      },
+      {
+        id: "market-memory",
+        name: "Market Memory",
+        description: "研究记忆 / 历史归因 / 案例库。",
+        workspace: "/home/node/.openclaw/workspace/market-memory",
+        agentDir: "/home/node/.openclaw/agents/market-memory/agent",
+        skills: [
+          "macro-mainline-analysis",
+          "strategy-review",
+          "memory-wiki-isolated",
+          "agent-skills-context-engineering",
+        ],
+        tools: {
+          allow: ["read", "group:memory", "group:web"],
+          deny: ["write", "edit", "apply_patch", "exec", "process", "browser", "canvas", "cron"],
+        },
+      },
+      {
+        id: "ops-guard",
+        name: "Ops Guard",
+        description: "配置检查 / doctor / 工具健康检查。",
+        workspace: "/home/node/.openclaw/workspace/ops-guard",
+        agentDir: "/home/node/.openclaw/agents/ops-guard/agent",
+        skills: ["healthcheck", "model-usage", "agent-skills-context-engineering"],
+        sandbox: {
+          mode: "all",
+          scope: "agent",
+          workspaceAccess: "none",
+        },
+        tools: {
+          allow: [
+            "sessions_list",
+            "sessions_history",
+            "session_status",
+            "cron",
+            "gateway",
+            "telegram",
+            "feishu",
+          ],
+          deny: ["read", "write", "edit", "apply_patch", "exec", "process", "browser", "canvas"],
+        },
+      },
+    ],
+  },
+
+  tools: {
+    fs: {
+      workspaceOnly: true,
+    },
+    agentToAgent: {
+      enabled: true,
+      allow: ["pattern-strategy", "pattern-quotation", "market-research", "market-memory", "ops-guard"],
+    },
+    sessions: {
+      visibility: "all",
+    },
+    web: {
+      search: {
+        enabled: true,
+        provider: "brave",
+        apiKey: "${BRAVE_API_KEY}",
+        maxResults: 5,
+        timeoutSeconds: 30,
+      },
+      fetch: {
+        enabled: true,
+        maxChars: 50000,
+        maxCharsCap: 50000,
+        timeoutSeconds: 30,
+        cacheTtlMinutes: 15,
+      },
+    },
+  },
+
+  session: {
+    dmScope: "per-channel-peer",
+    agentToAgent: {
+      maxPingPongTurns: 0,
+    },
+  },
+
+  bindings: [
+    {
+      agentId: "tas-dispatch",
+      match: {
+        channel: "telegram",
+        peer: { kind: "direct", id: "<telegram-user-id>" },
+      },
+    },
+    {
+      agentId: "tas-dispatch",
+      match: {
+        channel: "telegram",
+        peer: { kind: "group", id: "<telegram-group-id>" },
+      },
+    },
+    {
+      agentId: "tas-dispatch",
+      match: {
+        channel: "feishu",
+        accountId: "main",
+        peer: { kind: "direct", id: "<feishu-open-id>" },
+      },
+    },
+    {
+      agentId: "tas-dispatch",
+      match: {
+        channel: "feishu",
+        accountId: "main",
+        peer: { kind: "group", id: "<feishu-chat-id>" },
+      },
+    },
+  ],
+}

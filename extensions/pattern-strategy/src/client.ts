@@ -217,7 +217,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function normalizeChartUrl(value: string, config?: PatternStrategyPluginConfig): string {
+export function normalizePatternStrategyChartUrl(
+  value: string,
+  config?: PatternStrategyPluginConfig,
+): string {
   const chartBaseUrl = resolvePatternStrategyChartBaseUrl(config);
   let parsed: URL;
   try {
@@ -318,7 +321,7 @@ async function normalizePatternStrategyPayload(params: {
     return params.payload;
   }
 
-  const normalizedChartUrl = normalizeChartUrl(chartUrl.trim(), params.pluginConfig);
+  const normalizedChartUrl = normalizePatternStrategyChartUrl(chartUrl.trim(), params.pluginConfig);
   const chartMediaPath = await downloadChartToLocalMedia({
     chartUrl: normalizedChartUrl,
     chartPath: params.payload.data.chart_path,
@@ -352,6 +355,28 @@ function redactVisibleChanChartData(data: unknown): unknown {
   return Object.fromEntries(Object.entries(visible).filter(([, value]) => value !== undefined));
 }
 
+function buildChanChartMediaDetails(params: {
+  remoteToolName: string;
+  payload: RemoteToolEnvelope;
+}): { mediaUrl: string; mediaUrls: string[]; trustedLocalMedia: true } | undefined {
+  if (params.remoteToolName !== "chan.generate_chart" || !isRecord(params.payload.data)) {
+    return undefined;
+  }
+  const mediaPath = params.payload.data.chart_media_path;
+  if (typeof mediaPath !== "string") {
+    return undefined;
+  }
+  const normalized = mediaPath.trim();
+  if (!normalized) {
+    return undefined;
+  }
+  return {
+    mediaUrl: normalized,
+    mediaUrls: [normalized],
+    trustedLocalMedia: true,
+  };
+}
+
 export async function formatPatternStrategyResult(params: {
   remoteToolName: string;
   payload: RemoteToolEnvelope;
@@ -378,12 +403,14 @@ export async function formatPatternStrategyResult(params: {
         : payload.data,
     meta: payload.meta,
   };
+  const media = buildChanChartMediaDetails({ remoteToolName: params.remoteToolName, payload });
   return {
     content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
     details: {
       remoteToolName: params.remoteToolName,
       remote: payload,
       data: payload.data,
+      ...(media ? { media } : {}),
     },
   };
 }

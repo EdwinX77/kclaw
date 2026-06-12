@@ -30,13 +30,16 @@ Call the Pattern Strategy factor tools before web research:
    - Use first for CANSLIM `C` and partial `A`.
    - Treat it as the primary structured financial statement source. It reads the Pattern Strategy
      service's local macro DB financial statement tables, not public web pages.
-   - Default arguments:
-     - `symbols`: up to 50 symbols per batch
-     - `lookback_quarters`: `4`
-     - `include_series`: `false`
-   - If doing strict historical review and the signal date is known, pass:
-     - `as_of_date`: signal date
-     - `strict_point_in_time`: `true`
+   - Profit metrics include two口径:
+     - `net_profit_yoy_latest`: reported net profit YoY, original financial statement口径.
+     - `deduct_parent_net_profit_yoy_latest`: recurring / 扣非归母净利润 YoY, preferred for quality-adjusted earnings review.
+   - For front-end or agent comparison, compare:
+     - `net_profit_yoy_latest` vs `deduct_parent_net_profit_yoy_latest`
+     - `profit_yoy_qoq_delta` vs `deduct_profit_yoy_qoq_delta`
+     - `factor_signal` vs `deduct_factor_signal`
+     - `consecutive_profit_positive_quarters` vs `consecutive_deduct_profit_positive_quarters`
+   - For strict CANSLIM earnings quality, prioritize `deduct_parent_net_profit_yoy_latest`
+     when available; fall back to `net_profit_yoy_latest` only when扣非数据缺失, and explicitly note the fallback.
 
 2. `factor_institution_holder_change`
    - Use for CANSLIM `I` and part of `S`.

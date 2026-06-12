@@ -1,4 +1,6 @@
 // Feishu plugin module implements reply dispatcher behavior.
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { formatReasoningMessage } from "openclaw/plugin-sdk/agent-runtime";
 import { logTypingFailure } from "openclaw/plugin-sdk/channel-feedback";
 import { createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-outbound";
@@ -64,6 +66,50 @@ function formatMediaFallbackText(text: string | undefined, mediaUrl: string): st
   const trimmedText = text?.trim() ?? "";
   const attachmentText = `📎 ${mediaUrl}`;
   return trimmedText ? `${trimmedText}\n\n${attachmentText}` : attachmentText;
+}
+
+function resolveTrustedLocalMediaPath(mediaUrl: string): string | undefined {
+  const trimmed = mediaUrl.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (/^https?:\/\//iu.test(trimmed)) {
+    return undefined;
+  }
+  if (/^file:\/\//iu.test(trimmed)) {
+    try {
+      return fileURLToPath(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  return path.isAbsolute(trimmed) ? trimmed : undefined;
+}
+
+function resolveTrustedMediaLocalRoots(
+  payload: ReplyPayload,
+  mediaUrls: readonly string[],
+): string[] | undefined {
+  if ((payload as { trustedLocalMedia?: unknown }).trustedLocalMedia !== true) {
+    return undefined;
+  }
+  const roots = new Set<string>();
+  for (const mediaUrl of mediaUrls) {
+    const localPath = resolveTrustedLocalMediaPath(mediaUrl);
+    if (localPath) {
+      roots.add(path.dirname(localPath));
+    }
+  }
+  return roots.size > 0 ? [...roots] : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function shouldSendFeishuMediaBeforeText(payload: ReplyPayload): boolean {
+  const feishu = isRecord(payload.channelData?.feishu) ? payload.channelData.feishu : undefined;
+  return feishu?.mediaFirst === true;
 }
 
 export function clearFeishuStreamingStartBackoffForTests() {
@@ -232,7 +278,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   const chunkMode = core.channel.text.resolveChunkMode(cfg, "feishu");
   const tableMode = core.channel.text.resolveMarkdownTableMode({ cfg, channel: "feishu" });
   const renderMode = account.config?.renderMode ?? "auto";
-  const streamingEnabled = account.config?.streaming !== false && renderMode !== "raw";
+  const streamingEnabled = account.config?.streaming === true && renderMode !== "raw";
   const coreBlockStreamingEnabled = account.config?.blockStreaming === true;
   const reasoningPreviewEnabled = streamingEnabled && params.allowReasoningPreview === true;
 
@@ -485,6 +531,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
 
   const sendMediaReplies = async (payload: ReplyPayload, options?: { fallbackText?: string }) => {
     const mediaUrls = resolveSendableOutboundReplyParts(payload).mediaUrls;
+    const mediaLocalRoots = resolveTrustedMediaLocalRoots(payload, mediaUrls);
     let sentFallbackText = false;
     await sendMediaWithLeadingCaption({
       mediaUrls,
@@ -497,6 +544,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           replyToMessageId: sendReplyToMessageId,
           replyInThread: effectiveReplyInThread,
           accountId,
+          ...(mediaLocalRoots ? { mediaLocalRoots } : {}),
           ...(payload.audioAsVoice === true ? { audioAsVoice: true } : {}),
         });
         markVisibleReplySent();
@@ -644,9 +692,10 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           hasText &&
           streamingEnabled &&
           !finalTextExceedsStreamingLimit &&
-          (info?.kind === "final" || useStaticCard);
+          useStaticCard &&
+          (info?.kind === "final" || info?.kind === "block");
         const finalTextWouldUseStreamingCard =
-          info?.kind === "final" && hasText && streamingEnabled;
+          info?.kind === "final" && hasText && streamingEnabled && useStaticCard;
         const useCard = useStaticCard || useStreamingCard;
         const skipTextForDuplicateFinal =
           info?.kind === "final" && hasText && deliveredFinalTexts.has(text);
@@ -661,6 +710,12 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           !hasVoiceMedia &&
           !skipTextForDuplicateFinal &&
           !skipTextForClosedStreamingFinal;
+        const mediaBeforeText =
+          info?.kind === "final" &&
+          hasMedia &&
+          shouldDeliverText &&
+          !useStreamingCard &&
+          shouldSendFeishuMediaBeforeText(payload);
         const shouldDiscardStreamingPreview =
           info?.kind === "final" &&
           (finalTextExceedsStreamingLimit ||
@@ -674,16 +729,24 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           await discardStreamingPreview();
         }
 
+        if (mediaBeforeText) {
+          await sendMediaReplies(payload);
+        }
+
         if (shouldDeliverText) {
           if (info?.kind === "block") {
             // Drop internal block chunks unless we can safely consume them as
-            // streaming-card fallback content.
+            // streaming-card fallback content; media still belongs to the
+            // user-visible reply and is sent below.
             if (!useStreamingCard) {
-              return;
-            }
-            startStreaming();
-            if (streamingStartPromise) {
-              await streamingStartPromise;
+              if (!hasMedia) {
+                return;
+              }
+            } else {
+              startStreaming();
+              if (streamingStartPromise) {
+                await streamingStartPromise;
+              }
             }
           }
 
@@ -694,7 +757,8 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             }
           }
 
-          const shouldStreamText = info?.kind === "block" || info?.kind === "final";
+          const shouldStreamText =
+            (info?.kind === "block" && useStreamingCard) || info?.kind === "final";
           if (streaming?.isActive() && shouldStreamText) {
             if (info?.kind === "block") {
               // Some runtimes emit block payloads without onPartial/final callbacks.
@@ -714,7 +778,9 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             return;
           }
 
-          if (useCard) {
+          if (info?.kind === "block" && !useStreamingCard) {
+            // Block text is intentionally suppressed in raw/non-streaming mode.
+          } else if (useCard) {
             const cardHeader = resolveCardHeader(agentId, identity);
             const cardNote = resolveCardNote(agentId, identity, prefixContext.prefixContext);
             await sendChunkedTextReply({
@@ -755,7 +821,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           }
         }
 
-        if (hasMedia) {
+        if (hasMedia && !mediaBeforeText) {
           await sendMediaReplies(
             payload,
             hasVoiceMedia && hasText ? { fallbackText: text } : undefined,
@@ -793,6 +859,9 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
               trim: "both",
             });
             if (!cleaned) {
+              return;
+            }
+            if (renderMode !== "card" && !streaming?.isActive() && !streamingStartPromise) {
               return;
             }
             startStreaming();

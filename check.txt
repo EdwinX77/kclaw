@@ -1,0 +1,281 @@
+name: kclaw
+services:
+  openclaw-cli:
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    depends_on:
+      openclaw-gateway:
+        condition: service_started
+        required: true
+    entrypoint:
+      - node
+      - dist/index.js
+    environment:
+      ALL_PROXY: http://host.docker.internal:7993
+      BRAVE_API_KEY: BSAttrWkp1yEtneVXxZosYl319u_s55
+      BROWSER: echo
+      CLAUDE_AI_SESSION_KEY: ""
+      CLAUDE_WEB_COOKIE: ""
+      CLAUDE_WEB_SESSION_KEY: ""
+      DEEPSEEK_API_KEY: sk-e9fc4408d85749baaa3371e6fc980f85
+      DOCKER_GID: ""
+      FEISHU_APP_ID: cli_a93b8c7b61389bd2
+      FEISHU_APP_SECRET: nbQyaTJskCIztsFwfYY9eddDBaApc6Ze
+      HOME: /home/node
+      HTTP_PROXY: http://127.0.0.1:7993
+      HTTPS_PROXY: http://127.0.0.1:7993
+      NO_PROXY: 192.168.*,172.31.*,172.30.*,172.2*,172.19.*,172.18.*,172.17.*,172.16.*,10.*,127.*,*.local,localhost,*360buyimg.com,100ime-iat-api.xfyun.cn,*jd.com,*zhimg.com,*zhihu.com
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ""
+      OPENCLAW_APT_MIRROR: http://mirrors.ustc.edu.cn/debian
+      OPENCLAW_APT_SECURITY_MIRROR: http://mirrors.ustc.edu.cn/debian-security
+      OPENCLAW_AUTH_PROFILE_SECRET_DIR: /home/edwin/.openclaw-auth-profile-secrets
+      OPENCLAW_BRIDGE_PORT: "18790"
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_DISABLE_BONJOUR: ""
+      OPENCLAW_DOCKER_APT_PACKAGES: ""
+      OPENCLAW_DOCKER_BUILD_ALL_PROXY: ""
+      OPENCLAW_DOCKER_BUILD_HTTP_PROXY: ""
+      OPENCLAW_DOCKER_BUILD_HTTPS_PROXY: ""
+      OPENCLAW_DOCKER_BUILD_NO_PROXY: localhost,127.0.0.1,::1,host.docker.internal,openclaw-gateway,openclaw-cli,mirrors.ustc.edu.cn,npmreg.proxy.ustclug.org
+      OPENCLAW_DOCKER_SOCKET: /var/run/docker.sock
+      OPENCLAW_EXTENSIONS: ""
+      OPENCLAW_EXTRA_MOUNTS: ""
+      OPENCLAW_GATEWAY_BIND: lan
+      OPENCLAW_GATEWAY_PORT: "18789"
+      OPENCLAW_GATEWAY_TOKEN: e3b9cc17dd6988355f83f1018386a9af4ce85368a9140a726d1ccee44bcb3f12
+      OPENCLAW_HOME: /home/node
+      OPENCLAW_HOME_VOLUME: ""
+      OPENCLAW_IMAGE: kclaw:local
+      OPENCLAW_IMAGE_APT_PACKAGES: ""
+      OPENCLAW_IMAGE_PIP_PACKAGES: ""
+      OPENCLAW_INSTALL_BROWSER: ""
+      OPENCLAW_INSTALL_DOCKER_CLI: ""
+      OPENCLAW_NPM_REGISTRY: https://npmreg.proxy.ustclug.org/
+      OPENCLAW_OTEL_PRELOADED: ""
+      OPENCLAW_PNPM_CHILD_CONCURRENCY: "1"
+      OPENCLAW_PNPM_FETCH_RETRIES: "8"
+      OPENCLAW_PNPM_FETCH_RETRY_MAXTIMEOUT: "120000"
+      OPENCLAW_PNPM_FETCH_RETRY_MINTIMEOUT: "10000"
+      OPENCLAW_PNPM_NETWORK_CONCURRENCY: "1"
+      OPENCLAW_SANDBOX: ""
+      OPENCLAW_SKIP_ONBOARDING: ""
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_TZ: ""
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ""
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ""
+      OTEL_EXPORTER_OTLP_PROTOCOL: ""
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ""
+      OTEL_SEMCONV_STABILITY_OPT_IN: ""
+      OTEL_SERVICE_NAME: ""
+      TELEGRAM_BOT_TOKEN: 8006618175:AAFy_zUr7JTrLJKJWgWQ7bh-grb_IXJBeY0
+      TERM: xterm-256color
+      TZ: UTC
+      XOPENCLAW_EXTRA_MOUNTS: ""
+      all_proxy: http://host.docker.internal:7993
+      http_proxy: http://127.0.0.1:7993
+      https_proxy: http://127.0.0.1:7993
+      no_proxy: 192.168.*,172.31.*,172.30.*,172.2*,172.19.*,172.18.*,172.17.*,172.16.*,10.*,127.*,*.local,localhost,*360buyimg.com,100ime-iat-api.xfyun.cn,*jd.com,*zhimg.com,*zhihu.com
+    extra_hosts:
+      - host.docker.internal=host-gateway
+    image: kclaw:local
+    init: true
+    network_mode: service:openclaw-gateway
+    security_opt:
+      - no-new-privileges:true
+    stdin_open: true
+    tty: true
+    volumes:
+      - type: bind
+        source: /home/edwin/.openclaw
+        target: /home/node/.openclaw
+        bind: {}
+      - type: bind
+        source: /home/edwin/.openclaw/workspace
+        target: /home/node/.openclaw/workspace
+        bind: {}
+      - type: bind
+        source: /home/edwin/.openclaw-auth-profile-secrets
+        target: /home/node/.config/openclaw
+        bind: {}
+  openclaw-gateway:
+    build:
+      context: /home/edwin/workspace/kclaw
+      dockerfile: Dockerfile
+      args:
+        ALL_PROXY: ""
+        HTTP_PROXY: ""
+        HTTPS_PROXY: ""
+        NO_PROXY: localhost,127.0.0.1,::1,host.docker.internal,openclaw-gateway,openclaw-cli,mirrors.ustc.edu.cn,npmreg.proxy.ustclug.org
+        OPENCLAW_APT_MIRROR: http://mirrors.ustc.edu.cn/debian
+        OPENCLAW_APT_SECURITY_MIRROR: http://mirrors.ustc.edu.cn/debian-security
+        OPENCLAW_NPM_REGISTRY: https://npmreg.proxy.ustclug.org/
+        OPENCLAW_PNPM_CHILD_CONCURRENCY: "1"
+        OPENCLAW_PNPM_FETCH_RETRIES: "8"
+        OPENCLAW_PNPM_FETCH_RETRY_MAXTIMEOUT: "120000"
+        OPENCLAW_PNPM_FETCH_RETRY_MINTIMEOUT: "10000"
+        OPENCLAW_PNPM_NETWORK_CONCURRENCY: "1"
+        all_proxy: ""
+        http_proxy: ""
+        https_proxy: ""
+        no_proxy: localhost,127.0.0.1,::1,host.docker.internal,openclaw-gateway,openclaw-cli,mirrors.ustc.edu.cn,npmreg.proxy.ustclug.org
+      extra_hosts:
+        - host.docker.internal=host-gateway
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    command:
+      - sh
+      - -lc
+      - |
+        ln -sfn /app/src /home/node/.openclaw/src
+        node -e '
+        const net = require("net");
+        const listenHost = process.env.OPENCLAW_CDP_PROXY_LISTEN_HOST || "127.0.0.1";
+        const listenPort = Number(process.env.OPENCLAW_CDP_PROXY_LISTEN_PORT || 9223);
+        const targetHost = process.env.OPENCLAW_CDP_PROXY_TARGET_HOST || "host.docker.internal";
+        const targetPort = Number(process.env.OPENCLAW_CDP_PROXY_TARGET_PORT || 9222);
+        const server = net.createServer((client) => {
+          const upstream = net.connect(targetPort, targetHost);
+          client.pipe(upstream);
+          upstream.pipe(client);
+          const close = () => {
+            client.destroy();
+            upstream.destroy();
+          };
+          client.on("error", close);
+          upstream.on("error", close);
+        });
+        server.on("error", (error) => {
+          console.error("[cdp-proxy] failed: " + error.message);
+          process.exit(1);
+        });
+        server.listen(listenPort, listenHost, () => {
+          console.log("[cdp-proxy] " + listenHost + ":" + listenPort + " -> " + targetHost + ":" + targetPort);
+        });
+        setInterval(() => {}, 1 << 30);
+        ' &
+        exec node dist/index.js gateway --bind "$${OPENCLAW_GATEWAY_BIND:-lan}" --port 18789
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
+      - 1.1.1.1
+      - 8.8.8.8
+    environment:
+      ALL_PROXY: http://host.docker.internal:7993
+      BRAVE_API_KEY: BSAttrWkp1yEtneVXxZosYl319u_s55
+      CLAUDE_AI_SESSION_KEY: ""
+      CLAUDE_WEB_COOKIE: ""
+      CLAUDE_WEB_SESSION_KEY: ""
+      DEEPSEEK_API_KEY: sk-e9fc4408d85749baaa3371e6fc980f85
+      DOCKER_GID: ""
+      FEISHU_APP_ID: cli_a93b8c7b61389bd2
+      FEISHU_APP_SECRET: nbQyaTJskCIztsFwfYY9eddDBaApc6Ze
+      HOME: /home/node
+      HTTP_PROXY: http://127.0.0.1:7993
+      HTTPS_PROXY: http://127.0.0.1:7993
+      NO_PROXY: 192.168.*,172.31.*,172.30.*,172.2*,172.19.*,172.18.*,172.17.*,172.16.*,10.*,127.*,*.local,localhost,*360buyimg.com,100ime-iat-api.xfyun.cn,*jd.com,*zhimg.com,*zhihu.com
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ""
+      OPENCLAW_APT_MIRROR: http://mirrors.ustc.edu.cn/debian
+      OPENCLAW_APT_SECURITY_MIRROR: http://mirrors.ustc.edu.cn/debian-security
+      OPENCLAW_AUTH_PROFILE_SECRET_DIR: /home/edwin/.openclaw-auth-profile-secrets
+      OPENCLAW_BRIDGE_PORT: "18790"
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_DISABLE_BONJOUR: ""
+      OPENCLAW_DOCKER_APT_PACKAGES: ""
+      OPENCLAW_DOCKER_BUILD_ALL_PROXY: ""
+      OPENCLAW_DOCKER_BUILD_HTTP_PROXY: ""
+      OPENCLAW_DOCKER_BUILD_HTTPS_PROXY: ""
+      OPENCLAW_DOCKER_BUILD_NO_PROXY: localhost,127.0.0.1,::1,host.docker.internal,openclaw-gateway,openclaw-cli,mirrors.ustc.edu.cn,npmreg.proxy.ustclug.org
+      OPENCLAW_DOCKER_SOCKET: /var/run/docker.sock
+      OPENCLAW_EXTENSIONS: ""
+      OPENCLAW_EXTRA_MOUNTS: ""
+      OPENCLAW_GATEWAY_BIND: lan
+      OPENCLAW_GATEWAY_PORT: "18789"
+      OPENCLAW_GATEWAY_TOKEN: e3b9cc17dd6988355f83f1018386a9af4ce85368a9140a726d1ccee44bcb3f12
+      OPENCLAW_HOME: /home/node
+      OPENCLAW_HOME_VOLUME: ""
+      OPENCLAW_IMAGE: kclaw:local
+      OPENCLAW_IMAGE_APT_PACKAGES: ""
+      OPENCLAW_IMAGE_PIP_PACKAGES: ""
+      OPENCLAW_INSTALL_BROWSER: ""
+      OPENCLAW_INSTALL_DOCKER_CLI: ""
+      OPENCLAW_NPM_REGISTRY: https://npmreg.proxy.ustclug.org/
+      OPENCLAW_OTEL_PRELOADED: ""
+      OPENCLAW_PNPM_CHILD_CONCURRENCY: "1"
+      OPENCLAW_PNPM_FETCH_RETRIES: "8"
+      OPENCLAW_PNPM_FETCH_RETRY_MAXTIMEOUT: "120000"
+      OPENCLAW_PNPM_FETCH_RETRY_MINTIMEOUT: "10000"
+      OPENCLAW_PNPM_NETWORK_CONCURRENCY: "1"
+      OPENCLAW_SANDBOX: ""
+      OPENCLAW_SKIP_ONBOARDING: ""
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_TZ: ""
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ""
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ""
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ""
+      OTEL_SEMCONV_STABILITY_OPT_IN: ""
+      OTEL_SERVICE_NAME: ""
+      TELEGRAM_BOT_TOKEN: 8006618175:AAFy_zUr7JTrLJKJWgWQ7bh-grb_IXJBeY0
+      TERM: xterm-256color
+      TZ: UTC
+      XOPENCLAW_EXTRA_MOUNTS: ""
+      all_proxy: http://host.docker.internal:7993
+      http_proxy: http://127.0.0.1:7993
+      https_proxy: http://127.0.0.1:7993
+      no_proxy: 192.168.*,172.31.*,172.30.*,172.2*,172.19.*,172.18.*,172.17.*,172.16.*,10.*,127.*,*.local,localhost,*360buyimg.com,100ime-iat-api.xfyun.cn,*jd.com,*zhimg.com,*zhihu.com
+    extra_hosts:
+      - host.docker.internal=host-gateway
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      timeout: 5s
+      interval: 30s
+      retries: 5
+      start_period: 20s
+    image: kclaw:local
+    init: true
+    networks:
+      default: null
+    ports:
+      - mode: ingress
+        target: 18789
+        published: "18789"
+        protocol: tcp
+      - mode: ingress
+        target: 18790
+        published: "18790"
+        protocol: tcp
+      - mode: ingress
+        target: 3978
+        published: "3978"
+        protocol: tcp
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - type: bind
+        source: /home/edwin/.openclaw
+        target: /home/node/.openclaw
+        bind: {}
+      - type: bind
+        source: /home/edwin/.openclaw/workspace
+        target: /home/node/.openclaw/workspace
+        bind: {}
+      - type: bind
+        source: /home/edwin/.openclaw-auth-profile-secrets
+        target: /home/node/.config/openclaw
+        bind: {}
+networks:
+  default:
+    name: kclaw_default

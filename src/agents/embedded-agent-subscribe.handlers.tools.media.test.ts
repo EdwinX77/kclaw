@@ -520,6 +520,34 @@ describe("handleToolExecutionEnd media emission", () => {
     expect(ctx.emitToolOutput).toHaveBeenCalledTimes(1);
     expect(ctx.state.pendingToolMediaUrls).toEqual(["/tmp/meeting.wav"]);
   });
+
+  it("queues Chan chart plugin media as trusted local media for final reply delivery", async () => {
+    const ctx = createMockContext({
+      shouldEmitToolOutput: false,
+      trustedLocalMediaToolNames: new Set(["chan_generate_chart"]),
+    });
+
+    await handleToolExecutionEnd(ctx, {
+      type: "tool_execution_end",
+      toolName: "chan_generate_chart",
+      toolCallId: "tc-1",
+      isError: false,
+      result: {
+        content: [{ type: "text", text: "Chan chart image staged for delivery." }],
+        details: {
+          media: {
+            mediaUrls: ["/tmp/openclaw/pattern-chan/charts/chart.png"],
+            trustedLocalMedia: true,
+          },
+        },
+      },
+    });
+
+    expect(ctx.state.pendingToolMediaUrls).toEqual(["/tmp/openclaw/pattern-chan/charts/chart.png"]);
+    expect(ctx.state.pendingToolTrustedLocalMedia).toBe(true);
+    expect(ctx.params.onToolResult).not.toHaveBeenCalled();
+  });
+
   it("queues structured media once for markdown verbose output", async () => {
     const ctx = await handleVerboseGeneratedImage("markdown");
 

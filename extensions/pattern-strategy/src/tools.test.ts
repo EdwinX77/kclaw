@@ -269,6 +269,11 @@ describe("Pattern Strategy remote tools", () => {
       chart_media_path: expect.stringContaining("688563.png"),
       signals_detected: 2,
     });
+    expect(result.details?.media).toMatchObject({
+      mediaUrl: expect.stringContaining("688563.png"),
+      mediaUrls: [expect.stringContaining("688563.png")],
+      trustedLocalMedia: true,
+    });
     expect(result.content[0]?.text).toContain("delivery_instruction");
     expect(result.content[0]?.text).toContain("concise Chan-theory reading");
     expect(result.content[0]?.text).not.toContain("do not describe or analyze");

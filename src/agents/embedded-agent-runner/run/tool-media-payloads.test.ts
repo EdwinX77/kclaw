@@ -5,7 +5,33 @@ import {
   getReplyPayloadMetadata,
   setReplyPayloadMetadata,
 } from "../../../auto-reply/reply-payload.js";
-import { mergeAttemptToolMediaPayloads } from "./tool-media-payloads.js";
+import {
+  collectTrustedLocalMediaToolNames,
+  mergeAttemptToolMediaPayloads,
+} from "./tool-media-payloads.js";
+
+describe("collectTrustedLocalMediaToolNames", () => {
+  it("keeps core media tools and manifest-trusted plugin tools only", () => {
+    const imageTool = { name: "image_generate" };
+    const chartTool = { name: "chan_generate_chart" };
+    const privateTool = { name: "plugin_private" };
+    const collidingTool = { name: "Image_Generate" };
+
+    expect(
+      [
+        ...collectTrustedLocalMediaToolNames({
+          tools: [imageTool, chartTool, privateTool, collidingTool],
+          toolMeta: (tool) =>
+            tool === chartTool
+              ? { trustedLocalMedia: true }
+              : tool === privateTool
+                ? { trustedLocalMedia: false }
+                : undefined,
+        }),
+      ].sort(),
+    ).toEqual(["chan_generate_chart", "image_generate"]);
+  });
+});
 
 describe("mergeAttemptToolMediaPayloads", () => {
   it("attaches tool media to the first visible reply", () => {

@@ -3,8 +3,99 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT_DIR/scripts/lib/docker-build.sh"
+ENV_FILE="$ROOT_DIR/.env"
 COMPOSE_FILE="$ROOT_DIR/docker-compose.yml"
 EXTRA_COMPOSE_FILE="$ROOT_DIR/docker-compose.extra.yml"
+
+load_env_defaults() {
+  local file="$1"
+  local line key value
+  [[ -f "$file" ]] || return 0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    case "$line" in
+      "" | \#*) continue ;;
+    esac
+    case "$line" in
+      export\ *) line="${line#export }" ;;
+    esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    [[ "$key" != "$line" ]] || continue
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    should_load_env_default_key "$key" || continue
+    [[ -z "${!key+x}" ]] || continue
+
+    if [[ "$value" == \"*\" && "$value" == *\" && ${#value} -ge 2 ]]; then
+      value="${value:1:$((${#value} - 2))}"
+    elif [[ "$value" == \'*\' && "$value" == *\' && ${#value} -ge 2 ]]; then
+      value="${value:1:$((${#value} - 2))}"
+    fi
+    printf -v "$key" '%s' "$value"
+    export "$key"
+  done <"$file"
+}
+
+should_load_env_default_key() {
+  case "$1" in
+    DOCKER_GID | \
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS | \
+      OPENCLAW_APT_MIRROR | \
+      OPENCLAW_APT_SECURITY_MIRROR | \
+      OPENCLAW_AUTH_PROFILE_SECRET_DIR | \
+      OPENCLAW_BRIDGE_PORT | \
+      OPENCLAW_CONFIG_DIR | \
+      OPENCLAW_DISABLE_BONJOUR | \
+      OPENCLAW_DOCKER_BUILD_ALL_PROXY | \
+      OPENCLAW_DOCKER_BUILD_HTTP_PROXY | \
+      OPENCLAW_DOCKER_BUILD_HTTPS_PROXY | \
+      OPENCLAW_DOCKER_BUILD_NO_PROXY | \
+      OPENCLAW_DOCKER_SETUP_PULL_TIMEOUT | \
+      OPENCLAW_DOCKER_SOCKET | \
+      OPENCLAW_DOCKER_APT_PACKAGES | \
+      OPENCLAW_EXTRA_MOUNTS | \
+      OPENCLAW_EXTENSIONS | \
+      OPENCLAW_GATEWAY_BIND | \
+      OPENCLAW_GATEWAY_PORT | \
+      OPENCLAW_HOME_VOLUME | \
+      OPENCLAW_IMAGE | \
+      OPENCLAW_IMAGE_APT_PACKAGES | \
+      OPENCLAW_IMAGE_PIP_PACKAGES | \
+      OPENCLAW_INSTALL_BROWSER | \
+      OPENCLAW_INSTALL_DOCKER_CLI | \
+      OPENCLAW_COREPACK_NPM_REGISTRY | \
+      OPENCLAW_NPM_REGISTRY | \
+      OPENCLAW_OTEL_PRELOADED | \
+      OPENCLAW_PNPM_CHILD_CONCURRENCY | \
+      OPENCLAW_PNPM_FETCH_RETRIES | \
+      OPENCLAW_PNPM_FETCH_RETRY_MAXTIMEOUT | \
+      OPENCLAW_PNPM_FETCH_RETRY_MINTIMEOUT | \
+      OPENCLAW_PNPM_FETCH_TIMEOUT | \
+      OPENCLAW_PNPM_NETWORK_CONCURRENCY | \
+      OPENCLAW_RUNTIME_ALL_PROXY | \
+      OPENCLAW_RUNTIME_HTTP_PROXY | \
+      OPENCLAW_RUNTIME_HTTPS_PROXY | \
+      OPENCLAW_RUNTIME_NO_PROXY | \
+      OPENCLAW_SANDBOX | \
+      OPENCLAW_SKIP_ONBOARDING | \
+      OPENCLAW_TZ | \
+      OPENCLAW_WORKSPACE_DIR | \
+      OTEL_EXPORTER_OTLP_ENDPOINT | \
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT | \
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT | \
+      OTEL_EXPORTER_OTLP_PROTOCOL | \
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT | \
+      OTEL_SEMCONV_STABILITY_OPT_IN | \
+      OTEL_SERVICE_NAME)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+load_env_defaults "$ENV_FILE"
+
 IMAGE_NAME="${OPENCLAW_IMAGE:-openclaw:local}"
 EXTRA_MOUNTS="${OPENCLAW_EXTRA_MOUNTS:-}"
 HOME_VOLUME_NAME="${OPENCLAW_HOME_VOLUME:-}"
@@ -45,6 +136,15 @@ run_docker_pull() {
     return
   fi
   docker pull "$image"
+}
+
+is_local_build_image() {
+  case "$1" in
+    openclaw:local | kclaw:local)
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 is_truthy_value() {
@@ -316,6 +416,23 @@ export OPENCLAW_DISABLE_BONJOUR="${OPENCLAW_DISABLE_BONJOUR:-}"
 export OPENCLAW_IMAGE="$IMAGE_NAME"
 export OPENCLAW_IMAGE_APT_PACKAGES="${OPENCLAW_IMAGE_APT_PACKAGES-${OPENCLAW_DOCKER_APT_PACKAGES:-}}"
 export OPENCLAW_IMAGE_PIP_PACKAGES="${OPENCLAW_IMAGE_PIP_PACKAGES:-}"
+export OPENCLAW_APT_MIRROR="${OPENCLAW_APT_MIRROR:-}"
+export OPENCLAW_APT_SECURITY_MIRROR="${OPENCLAW_APT_SECURITY_MIRROR:-}"
+export OPENCLAW_DOCKER_BUILD_HTTP_PROXY="${OPENCLAW_DOCKER_BUILD_HTTP_PROXY:-}"
+export OPENCLAW_DOCKER_BUILD_HTTPS_PROXY="${OPENCLAW_DOCKER_BUILD_HTTPS_PROXY:-}"
+export OPENCLAW_DOCKER_BUILD_ALL_PROXY="${OPENCLAW_DOCKER_BUILD_ALL_PROXY:-}"
+export OPENCLAW_DOCKER_BUILD_NO_PROXY="${OPENCLAW_DOCKER_BUILD_NO_PROXY:-localhost,127.0.0.1,::1,host.docker.internal,openclaw-gateway,openclaw-cli,mirrors.ustc.edu.cn,npmreg.proxy.ustclug.org}"
+export OPENCLAW_RUNTIME_HTTP_PROXY="${OPENCLAW_RUNTIME_HTTP_PROXY:-}"
+export OPENCLAW_RUNTIME_HTTPS_PROXY="${OPENCLAW_RUNTIME_HTTPS_PROXY:-}"
+export OPENCLAW_RUNTIME_ALL_PROXY="${OPENCLAW_RUNTIME_ALL_PROXY:-}"
+export OPENCLAW_RUNTIME_NO_PROXY="${OPENCLAW_RUNTIME_NO_PROXY:-localhost,127.0.0.1,::1,host.docker.internal,openclaw-gateway,openclaw-cli}"
+export OPENCLAW_COREPACK_NPM_REGISTRY="${OPENCLAW_COREPACK_NPM_REGISTRY:-}"
+export OPENCLAW_PNPM_NETWORK_CONCURRENCY="${OPENCLAW_PNPM_NETWORK_CONCURRENCY:-4}"
+export OPENCLAW_PNPM_CHILD_CONCURRENCY="${OPENCLAW_PNPM_CHILD_CONCURRENCY:-1}"
+export OPENCLAW_PNPM_FETCH_TIMEOUT="${OPENCLAW_PNPM_FETCH_TIMEOUT:-600000}"
+export OPENCLAW_PNPM_FETCH_RETRIES="${OPENCLAW_PNPM_FETCH_RETRIES:-5}"
+export OPENCLAW_PNPM_FETCH_RETRY_MINTIMEOUT="${OPENCLAW_PNPM_FETCH_RETRY_MINTIMEOUT:-10000}"
+export OPENCLAW_PNPM_FETCH_RETRY_MAXTIMEOUT="${OPENCLAW_PNPM_FETCH_RETRY_MAXTIMEOUT:-60000}"
 export OPENCLAW_EXTENSIONS="${OPENCLAW_EXTENSIONS:-}"
 export OPENCLAW_INSTALL_BROWSER="${OPENCLAW_INSTALL_BROWSER:-}"
 export OPENCLAW_EXTRA_MOUNTS="$EXTRA_MOUNTS"
@@ -469,7 +586,6 @@ for compose_file in "${COMPOSE_FILES[@]}"; do
   COMPOSE_HINT+=" -f ${compose_file}"
 done
 
-ENV_FILE="$ROOT_DIR/.env"
 upsert_env() {
   local file="$1"
   shift
@@ -521,6 +637,24 @@ upsert_env "$ENV_FILE" \
   OPENCLAW_HOME_VOLUME \
   OPENCLAW_IMAGE_APT_PACKAGES \
   OPENCLAW_IMAGE_PIP_PACKAGES \
+  OPENCLAW_APT_MIRROR \
+  OPENCLAW_APT_SECURITY_MIRROR \
+  OPENCLAW_DOCKER_BUILD_HTTP_PROXY \
+  OPENCLAW_DOCKER_BUILD_HTTPS_PROXY \
+  OPENCLAW_DOCKER_BUILD_ALL_PROXY \
+  OPENCLAW_DOCKER_BUILD_NO_PROXY \
+  OPENCLAW_RUNTIME_HTTP_PROXY \
+  OPENCLAW_RUNTIME_HTTPS_PROXY \
+  OPENCLAW_RUNTIME_ALL_PROXY \
+  OPENCLAW_RUNTIME_NO_PROXY \
+  OPENCLAW_COREPACK_NPM_REGISTRY \
+  OPENCLAW_NPM_REGISTRY \
+  OPENCLAW_PNPM_NETWORK_CONCURRENCY \
+  OPENCLAW_PNPM_CHILD_CONCURRENCY \
+  OPENCLAW_PNPM_FETCH_TIMEOUT \
+  OPENCLAW_PNPM_FETCH_RETRIES \
+  OPENCLAW_PNPM_FETCH_RETRY_MINTIMEOUT \
+  OPENCLAW_PNPM_FETCH_RETRY_MAXTIMEOUT \
   OPENCLAW_EXTENSIONS \
   OPENCLAW_INSTALL_BROWSER \
   OPENCLAW_SANDBOX \
@@ -539,11 +673,29 @@ upsert_env "$ENV_FILE" \
   OPENCLAW_OTEL_PRELOADED \
   OPENCLAW_SKIP_ONBOARDING
 
-if [[ "$IMAGE_NAME" == "openclaw:local" ]]; then
+if is_local_build_image "$IMAGE_NAME"; then
   echo "==> Building Docker image: $IMAGE_NAME"
   run_docker_build \
     --build-arg "OPENCLAW_IMAGE_APT_PACKAGES=${OPENCLAW_IMAGE_APT_PACKAGES}" \
     --build-arg "OPENCLAW_IMAGE_PIP_PACKAGES=${OPENCLAW_IMAGE_PIP_PACKAGES}" \
+    --build-arg "OPENCLAW_APT_MIRROR=${OPENCLAW_APT_MIRROR:-}" \
+    --build-arg "OPENCLAW_APT_SECURITY_MIRROR=${OPENCLAW_APT_SECURITY_MIRROR:-}" \
+    --build-arg "HTTP_PROXY=${OPENCLAW_DOCKER_BUILD_HTTP_PROXY:-}" \
+    --build-arg "HTTPS_PROXY=${OPENCLAW_DOCKER_BUILD_HTTPS_PROXY:-}" \
+    --build-arg "ALL_PROXY=${OPENCLAW_DOCKER_BUILD_ALL_PROXY:-}" \
+    --build-arg "NO_PROXY=${OPENCLAW_DOCKER_BUILD_NO_PROXY:-}" \
+    --build-arg "http_proxy=${OPENCLAW_DOCKER_BUILD_HTTP_PROXY:-}" \
+    --build-arg "https_proxy=${OPENCLAW_DOCKER_BUILD_HTTPS_PROXY:-}" \
+    --build-arg "all_proxy=${OPENCLAW_DOCKER_BUILD_ALL_PROXY:-}" \
+    --build-arg "no_proxy=${OPENCLAW_DOCKER_BUILD_NO_PROXY:-}" \
+    --build-arg "OPENCLAW_COREPACK_NPM_REGISTRY=${OPENCLAW_COREPACK_NPM_REGISTRY:-}" \
+    --build-arg "OPENCLAW_NPM_REGISTRY=${OPENCLAW_NPM_REGISTRY:-}" \
+    --build-arg "OPENCLAW_PNPM_NETWORK_CONCURRENCY=${OPENCLAW_PNPM_NETWORK_CONCURRENCY:-4}" \
+    --build-arg "OPENCLAW_PNPM_CHILD_CONCURRENCY=${OPENCLAW_PNPM_CHILD_CONCURRENCY:-1}" \
+    --build-arg "OPENCLAW_PNPM_FETCH_TIMEOUT=${OPENCLAW_PNPM_FETCH_TIMEOUT:-600000}" \
+    --build-arg "OPENCLAW_PNPM_FETCH_RETRIES=${OPENCLAW_PNPM_FETCH_RETRIES:-5}" \
+    --build-arg "OPENCLAW_PNPM_FETCH_RETRY_MINTIMEOUT=${OPENCLAW_PNPM_FETCH_RETRY_MINTIMEOUT:-10000}" \
+    --build-arg "OPENCLAW_PNPM_FETCH_RETRY_MAXTIMEOUT=${OPENCLAW_PNPM_FETCH_RETRY_MAXTIMEOUT:-60000}" \
     --build-arg "OPENCLAW_EXTENSIONS=${OPENCLAW_EXTENSIONS}" \
     --build-arg "OPENCLAW_INSTALL_BROWSER=${OPENCLAW_INSTALL_BROWSER}" \
     --build-arg "OPENCLAW_INSTALL_DOCKER_CLI=${OPENCLAW_INSTALL_DOCKER_CLI:-}" \
@@ -646,7 +798,7 @@ if [[ -n "$SANDBOX_ENABLED" ]]; then
   if ! docker compose "${COMPOSE_ARGS[@]}" run --rm --entrypoint docker openclaw-gateway --version >/dev/null 2>&1; then
     echo "WARNING: Docker CLI not found inside the container image." >&2
     echo "  Sandbox requires Docker CLI. Rebuild with --build-arg OPENCLAW_INSTALL_DOCKER_CLI=1" >&2
-    echo "  or use a local build (OPENCLAW_IMAGE=openclaw:local). Skipping sandbox setup." >&2
+    echo "  or use a local build (OPENCLAW_IMAGE=kclaw:local). Skipping sandbox setup." >&2
     SANDBOX_ENABLED=""
   fi
 fi

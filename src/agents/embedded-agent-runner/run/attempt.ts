@@ -466,6 +466,7 @@ import {
   buildRuntimeContextCustomMessage,
   resolveRuntimeContextPromptParts,
 } from "./runtime-context-prompt.js";
+import { collectTrustedLocalMediaToolNames } from "./tool-media-payloads.js";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 
 export {
@@ -2179,6 +2180,10 @@ export async function runEmbeddedAttempt(
           return name ? [name] : [];
         }),
       );
+      const trustedLocalMediaToolNames = collectTrustedLocalMediaToolNames({
+        tools: uncompactedEffectiveTools,
+        toolMeta: (tool) => getPluginToolMeta(tool as Parameters<typeof getPluginToolMeta>[0]),
+      });
       // Admission-time conflict check only against non-plugin core tools, to
       // preserve prior behavior where client tools may coexist with unrelated
       // plugin tool names. MEDIA passthrough is still gated by the raw-name
@@ -3302,6 +3307,7 @@ export async function runEmbeddedAttempt(
           sessionId: params.sessionId,
           agentId: sessionAgentId,
           builtinToolNames,
+          trustedLocalMediaToolNames,
           internalEvents: params.internalEvents,
         }),
       );
