@@ -184,6 +184,130 @@ function sanitizeNativeFeishuCardButton(button: unknown): Record<string, unknown
   return rendered;
 }
 
+type FeishuTableColumn = {
+  name: string;
+  display_name: string;
+  data_type: "text" | "number" | "date";
+  width?: string;
+};
+
+function sanitizeNativeFeishuTableIdentifier(value: unknown) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return /^[A-Za-z0-9_.-]{1,64}$/u.test(text) ? text : undefined;
+}
+
+function trimNativeFeishuTableText(value: string, maxLength: number) {
+  const text = value.replace(/\s+/g, " ").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
+function sanitizeNativeFeishuTableColumn(column: unknown): FeishuTableColumn | undefined {
+  if (!isRecord(column)) {
+    return undefined;
+  }
+  const name = sanitizeNativeFeishuTableIdentifier(column.name);
+  if (!name) {
+    return undefined;
+  }
+  const displayName =
+    typeof column.display_name === "string" && column.display_name.trim()
+      ? trimNativeFeishuTableText(escapeFeishuCardMarkdownText(column.display_name), 40)
+      : name;
+  const dataType =
+    column.data_type === "number" || column.data_type === "date" ? column.data_type : "text";
+  const width =
+    typeof column.width === "string" && /^(?:auto|\d{2,4}px)$/u.test(column.width.trim())
+      ? column.width.trim()
+      : undefined;
+  return {
+    name,
+    display_name: displayName,
+    data_type: dataType,
+    ...(width ? { width } : {}),
+  };
+}
+
+function sanitizeNativeFeishuTableCell(value: unknown): string | number | undefined {
+  if (typeof value === "string") {
+    return trimNativeFeishuTableText(escapeFeishuCardMarkdownText(value), 240);
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  return undefined;
+}
+
+function sanitizeNativeFeishuTableHeaderStyle(value: unknown) {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const rendered: Record<string, unknown> = {};
+  for (const key of ["text_align", "text_size", "background_style", "text_color"]) {
+    const field = value[key];
+    if (typeof field === "string" && field.trim()) {
+      rendered[key] = field.trim();
+    }
+  }
+  if (typeof value.bold === "boolean") {
+    rendered.bold = value.bold;
+  }
+  if (typeof value.lines === "number" && Number.isFinite(value.lines)) {
+    rendered.lines = Math.max(1, Math.floor(value.lines));
+  }
+  return Object.keys(rendered).length > 0 ? rendered : undefined;
+}
+
+function sanitizeNativeFeishuCardTable(element: Record<string, unknown>) {
+  const columns = Array.isArray(element.columns)
+    ? element.columns
+        .map((column) => sanitizeNativeFeishuTableColumn(column))
+        .filter((column): column is FeishuTableColumn => Boolean(column))
+    : [];
+  if (columns.length === 0 || !Array.isArray(element.rows)) {
+    return undefined;
+  }
+  const rows = element.rows
+    .map((row) => {
+      if (!isRecord(row)) {
+        return undefined;
+      }
+      const rendered: Record<string, string | number> = {};
+      for (const column of columns) {
+        const value = sanitizeNativeFeishuTableCell(row[column.name]);
+        if (value !== undefined) {
+          rendered[column.name] = value;
+        }
+      }
+      return Object.keys(rendered).length > 0 ? rendered : undefined;
+    })
+    .filter((row): row is Record<string, string | number> => Boolean(row));
+  if (rows.length === 0) {
+    return undefined;
+  }
+  const pageSize =
+    typeof element.page_size === "number" && Number.isFinite(element.page_size)
+      ? Math.min(20, Math.max(1, Math.floor(element.page_size)))
+      : Math.min(20, rows.length);
+  const rowHeight = element.row_height === "auto" ? "auto" : undefined;
+  const elementId = sanitizeNativeFeishuTableIdentifier(element.element_id);
+  const headerStyle = sanitizeNativeFeishuTableHeaderStyle(element.header_style);
+  return {
+    tag: "table",
+    ...(elementId ? { element_id: elementId } : {}),
+    page_size: pageSize,
+    ...(rowHeight ? { row_height: rowHeight } : {}),
+    ...(typeof element.freeze_first_column === "boolean"
+      ? { freeze_first_column: element.freeze_first_column }
+      : {}),
+    ...(headerStyle ? { header_style: headerStyle } : {}),
+    columns,
+    rows,
+  };
+}
+
 function sanitizeNativeFeishuCardElements(element: unknown): Record<string, unknown>[] {
   if (!isRecord(element) || typeof element.tag !== "string") {
     return [];
@@ -198,6 +322,10 @@ function sanitizeNativeFeishuCardElements(element: unknown): Record<string, unkn
         content: escapeFeishuCardMarkdownText(element.content),
       },
     ];
+  }
+  if (element.tag === "table") {
+    const table = sanitizeNativeFeishuCardTable(element);
+    return table ? [table] : [];
   }
   if (element.tag === "button") {
     const button = sanitizeNativeFeishuCardButton(element);

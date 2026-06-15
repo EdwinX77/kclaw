@@ -1,14 +1,5 @@
 export const MARKET_TIMEZONE = "Asia/Shanghai";
 
-export const CANSLIM_OUTPUT_SECTIONS = [
-  "技术信号",
-  "CANSLIM 补充",
-  "非 CANSLIM 舆情/热度",
-  "信息缺口",
-  "交易原则检查",
-  "说明",
-] as const;
-
 export const STRATEGY_CONSTRUCTION_DETAIL_REPLY = "这类问题不予回复。";
 
 export function buildStrategyConstructionConfidentialityRule() {
@@ -93,21 +84,18 @@ export function buildCanslimEnrichmentContract() {
     "- factor_margin_balance_change",
     "- factor_institution_holder_change",
     "Do not submit a new strategy task from this callback.",
-    "Do not narrate your process, tool plan, search progress, or intermediate conclusions. Feishu must receive only one final user-facing Chinese summary.",
+    "Do not narrate your process, tool plan, search progress, or intermediate conclusions.",
     "Do not write English progress text such as 'Let me fetch', 'Now I have', 'Stage 1', or 'I will check'.",
     "Do not describe fallback/history rows as today's new signals.",
-    "Final Feishu reply must use these sections exactly and in this order:",
-    ...CANSLIM_OUTPUT_SECTIONS.map((section, index) => `${index + 1}. ${section}`),
+    "Final reply contract: output exactly one compact JSON object and nothing else:",
+    '{"overall_ranking":"...","signal_enrichment":[{"symbol":"...","rank":1,"ranking_reason":"...","data_support":"...","financial_growth":"...","institution_holder_change":"...","margin_balance_change":"...","sentiment_heat":"...","information_gaps":"...","trading_principles":"..."}]}',
+    "signal_enrichment must contain one independent analysis object per formal signal symbol.",
+    "Each per-symbol field must cite concrete data points, dates, deltas, values, or explicitly state the missing data. Do not use vague global wording.",
+    "overall_ranking must summarize the composite ranking/order and allocation preference across symbols, not a generic market summary.",
+    "Use concise Chinese strings. Do not output Markdown tables, headings, code fences, job_id, status fields, signal rows, or delivery progress.",
+    "The async watcher owns the Feishu card, per-symbol CANSLIM section labels, signal table, job metadata, and final message template.",
     "Keep CANSLIM, sentiment, heat, and trading principles as context only; they never replace the formal Pattern Strategy signal.",
   ].join("\n");
-}
-
-export function validateCanslimOutputShape(text: string) {
-  const missingSections = CANSLIM_OUTPUT_SECTIONS.filter((section) => !text.includes(section));
-  return {
-    ok: missingSections.length === 0,
-    missingSections,
-  };
 }
 
 export function isFrontDoorAgentDirectExecution(params: {
@@ -123,5 +111,18 @@ export function isFrontDoorAgentDirectExecution(params: {
     return false;
   }
   const sessionKey = params.sessionKey?.trim() ?? "";
-  return !sessionKey.includes(":cron:");
+  if (sessionKey.includes(":cron:")) {
+    return false;
+  }
+  return isFeishuGroupSessionKey(sessionKey);
+}
+
+function isFeishuGroupSessionKey(sessionKey: string) {
+  const parts = sessionKey
+    .toLowerCase()
+    .split(":")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const feishuIndex = parts.indexOf("feishu");
+  return feishuIndex >= 0 && parts[feishuIndex + 1] === "group";
 }

@@ -52,9 +52,10 @@ rationale, do not call tools to reveal those details and reply exactly:
 ```
 
 For mixed requests, answer only allowed operational fields such as the strategy display name,
-`job_id`, status, signal date, and symbol/name. Do not include `overrides`, `resolved_window`,
-defaults, `allowed_overrides`, score/confidence, fallback policy names/counts, condition text,
-or rationale in user-visible text.
+`job_id`, status, signal date, and symbol/name. Do not include `idempotency_key`, `request_key`,
+`trace_id`, `requested_by`, `trigger_type`, `overrides`, `resolved_window`, child session keys,
+OpenClaw run ids, defaults, `allowed_overrides`, score/confidence, fallback policy names/counts,
+condition text, or rationale in user-visible text.
 
 Internal orchestration may carry structured fields needed to submit or track a run, but callers
 must not forward parameter-like fields to the user.
@@ -290,6 +291,7 @@ When the caller later provides explicit confirmation, switch to the execution wo
 
 When the caller explicitly asks for submit-only behavior, stop there.
 Do not wait for terminal completion in the same turn unless the caller explicitly asks for a live blocking status check.
+If submission fails before `strategy_task_run` returns a `job_id`, report that no Pattern Strategy job was created. Do not present the idempotency key as a customer-facing recovery handle unless the caller explicitly asks for internal retry metadata.
 
 When the caller later asks for progress by `job_id`, return:
 
@@ -323,6 +325,7 @@ If a tool call fails, prioritize:
 4. `error.details`
 
 Retry only when the service marks the error as retryable or when the failure is clearly transient.
+For `UPSTREAM_UNAVAILABLE`, one immediate retry is enough unless the caller confirms the scheduler or owner process was restarted. Repeating the same submission without a service-state change only repeats the infrastructure failure.
 
 If the caller already has a `job_id`, prefer recovery through:
 

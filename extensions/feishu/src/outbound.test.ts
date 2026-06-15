@@ -758,6 +758,69 @@ describe("feishuOutbound.sendPayload native cards", () => {
     expect(JSON.stringify(card)).not.toContain("image-secret");
   });
 
+  it("preserves sanitized native Feishu table cards", async () => {
+    await feishuOutbound.sendPayload?.({
+      cfg: emptyConfig,
+      to: "chat_1",
+      text: "fallback",
+      accountId: "main",
+      payload: {
+        text: "fallback",
+        channelData: {
+          feishu: {
+            card: {
+              schema: "2.0",
+              header: {
+                title: { tag: "plain_text", content: "Strategy Signals" },
+                template: "green",
+              },
+              body: {
+                elements: [
+                  {
+                    tag: "table",
+                    element_id: "signal_table",
+                    page_size: 5,
+                    row_height: "auto",
+                    freeze_first_column: true,
+                    header_style: { text_align: "left", bold: true, lines: 1 },
+                    columns: [
+                      { name: "symbol", display_name: "代码", data_type: "text", width: "100px" },
+                      { name: "point", display_name: "要点", data_type: "text", width: "auto" },
+                      { name: "../bad", display_name: "bad", data_type: "text" },
+                    ],
+                    rows: [
+                      {
+                        symbol: "002669.SZ",
+                        point: '<at id="ou_1">ping</at>',
+                        "../bad": "drop",
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const table = sendCardCall()?.card?.body?.elements?.[0];
+    expect(table).toMatchObject({
+      tag: "table",
+      element_id: "signal_table",
+      page_size: 5,
+      row_height: "auto",
+      freeze_first_column: true,
+      header_style: { text_align: "left", bold: true, lines: 1 },
+      columns: [
+        { name: "symbol", display_name: "代码", data_type: "text", width: "100px" },
+        { name: "point", display_name: "要点", data_type: "text", width: "auto" },
+      ],
+      rows: [{ symbol: "002669.SZ", point: '&lt;at id="ou_1"&gt;ping&lt;/at&gt;' }],
+    });
+    expect(JSON.stringify(table)).not.toContain("../bad");
+  });
+
   it("sends payload media before final native cards", async () => {
     const result = await feishuOutbound.sendPayload?.({
       cfg: emptyConfig,

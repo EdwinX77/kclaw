@@ -4,6 +4,7 @@ import type { LiveSessionModelSelection } from "../../agents/live-model-switch.j
 import type { SessionEntry } from "../../config/sessions.js";
 import { isCronSessionKey } from "../../sessions/session-key-utils.js";
 import type { SkillSnapshot } from "../../skills/types.js";
+import { normalizeSessionDeliveryFields } from "../../utils/delivery-context.shared.js";
 import type { resolveCronSession } from "./session.js";
 
 type MutableSessionStore = Record<string, SessionEntry>;
@@ -145,6 +146,61 @@ export function markCronSessionPreRun(params: {
   params.entry.modelProvider = params.provider;
   params.entry.model = params.model;
   params.entry.systemSent = true;
+}
+
+type CronResolvedDeliveryContext = {
+  ok: boolean;
+  channel?: string;
+  to?: string;
+  accountId?: string;
+  threadId?: string | number;
+};
+
+function setOptionalSessionField<K extends keyof SessionEntry>(
+  entry: SessionEntry,
+  key: K,
+  value: SessionEntry[K] | undefined,
+): void {
+  if (value === undefined) {
+    delete entry[key];
+    return;
+  }
+  entry[key] = value;
+}
+
+/** Mirrors the resolved cron delivery target into the session before tool execution. */
+export function seedCronSessionDeliveryContext(params: {
+  entry: MutableCronSessionEntry;
+  resolvedDelivery: CronResolvedDeliveryContext;
+}): boolean {
+  if (!params.resolvedDelivery.ok) {
+    return false;
+  }
+  const normalized = normalizeSessionDeliveryFields({
+    deliveryContext: {
+      channel: params.resolvedDelivery.channel,
+      to: params.resolvedDelivery.to,
+      accountId: params.resolvedDelivery.accountId,
+      threadId: params.resolvedDelivery.threadId,
+    },
+  });
+  if (!normalized.deliveryContext?.channel || !normalized.deliveryContext.to) {
+    return false;
+  }
+
+  // Async plugin watchers snapshot session routing while the cron turn is
+  // running, before the final cron auto-delivery path executes.
+  setOptionalSessionField(params.entry, "route", normalized.route);
+  setOptionalSessionField(params.entry, "deliveryContext", normalized.deliveryContext);
+  setOptionalSessionField(
+    params.entry,
+    "lastChannel",
+    normalized.lastChannel as SessionEntry["lastChannel"],
+  );
+  setOptionalSessionField(params.entry, "lastTo", normalized.lastTo);
+  setOptionalSessionField(params.entry, "lastAccountId", normalized.lastAccountId);
+  setOptionalSessionField(params.entry, "lastThreadId", normalized.lastThreadId);
+  return true;
 }
 
 /** Syncs live model/auth-profile changes from a running cron session back to storage. */

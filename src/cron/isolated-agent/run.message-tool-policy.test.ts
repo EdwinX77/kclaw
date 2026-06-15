@@ -487,6 +487,52 @@ describe("runCronIsolatedAgentTurn message tool policy", () => {
     });
   });
 
+  it("seeds the cron session delivery context before the agent can register async watchers", async () => {
+    mockRunCronFallbackPassthrough();
+    const cronSession = makeCronSession();
+    resolveCronSessionMock.mockReturnValue(cronSession);
+    resolveCronDeliveryPlanMock.mockReturnValue(
+      makeAnnounceDeliveryPlan({
+        channel: "messagechat",
+        to: "user:ou_123",
+        accountId: "main",
+        threadId: "thread-1",
+      }),
+    );
+    resolveDeliveryTargetMock.mockResolvedValue({
+      ok: true,
+      channel: "messagechat",
+      to: "user:ou_123",
+      accountId: "main",
+      threadId: "thread-1",
+      mode: "explicit",
+    });
+
+    await runCronIsolatedAgentTurn({
+      ...makeParams(),
+      job: makeAnnounceMessageToolJob({
+        delivery: {
+          channel: "messagechat",
+          to: "user:ou_123",
+          accountId: "main",
+          threadId: "thread-1",
+        },
+      }),
+    });
+
+    expect(runEmbeddedAgentMock).toHaveBeenCalledTimes(1);
+    expect(cronSession.sessionEntry.deliveryContext).toEqual({
+      channel: "messagechat",
+      to: "user:ou_123",
+      accountId: "main",
+      threadId: "thread-1",
+    });
+    expect(cronSession.sessionEntry.lastChannel).toBe("messagechat");
+    expect(cronSession.sessionEntry.lastTo).toBe("user:ou_123");
+    expect(cronSession.sessionEntry.lastAccountId).toBe("main");
+    expect(cronSession.sessionEntry.lastThreadId).toBe("thread-1");
+  });
+
   it("marks delivery.mode none delivered when the message tool sends to the explicit target", async () => {
     mockRunCronFallbackPassthrough();
     resolveCronDeliveryPlanMock.mockReturnValue({

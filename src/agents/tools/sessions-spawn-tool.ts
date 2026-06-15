@@ -202,6 +202,12 @@ function createSessionsSpawnToolSchema(params: {
         description: 'Light bootstrap context; runtime="subagent" only.',
       }),
     ),
+    expectsCompletionMessage: Type.Optional(
+      Type.Boolean({
+        description:
+          "Set false for internal setup work when the parent will collect/sanitize results separately; suppresses automatic completion delivery.",
+      }),
+    ),
 
     // Inline attachments (snapshot-by-value).
     attachments: Type.Optional(

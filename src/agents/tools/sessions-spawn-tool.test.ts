@@ -383,6 +383,28 @@ describe("sessions_spawn tool", () => {
     expect(spawnArgs.taskName).toBe("review-subagents");
   });
 
+  it("advertises and applies completion announce suppression", async () => {
+    const tool = createSessionsSpawnTool({
+      agentSessionKey: "agent:main:main",
+    });
+    const schema = tool.parameters as {
+      properties?: Record<string, { description?: string; type?: string } | undefined>;
+    };
+
+    const completionProperty = requireSchemaProperty(schema.properties, "expectsCompletionMessage");
+    expect(completionProperty.type).toBe("boolean");
+    expect(completionProperty.description).toContain("suppress");
+    expect(tool.description).toContain("expectsCompletionMessage=false");
+
+    await tool.execute("call-internal-child", {
+      task: "prepare internal strategy session",
+      expectsCompletionMessage: false,
+    });
+
+    const spawnArgs = mockCallArg(hoisted.spawnSubagentDirectMock, 0, 0, "spawnSubagentDirect");
+    expect(spawnArgs.expectsCompletionMessage).toBe(false);
+  });
+
   it("accepts underscore taskName aliases", async () => {
     const tool = createSessionsSpawnTool({
       agentSessionKey: "agent:main:main",

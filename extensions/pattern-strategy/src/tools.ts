@@ -98,7 +98,7 @@ function createRemoteTool(api: OpenClawPluginApi, ctx: OpenClawPluginToolContext
         })
       ) {
         throw new Error(
-          "strategy_task_run is blocked for the Feishu front-door agent. Resolve status through automation_run_latest/get_run, or delegate confirmed execution to the internal pattern-strategy agent.",
+          "strategy_task_run is blocked for the Feishu group front-door agent. Resolve status through automation_run_latest/get_run, or delegate confirmed execution to the internal pattern-strategy agent.",
         );
       }
       const submission =

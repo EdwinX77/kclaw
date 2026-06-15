@@ -71,6 +71,19 @@ type WatchServiceState = {
 const INDICE_TERMINAL_STATUSES = new Set(["completed", "partial_failed", "failed"]);
 const DEFAULT_POLL_MS = 60_000;
 const MIN_POLL_MS = 5_000;
+const MAX_SIGNAL_CARD_ROWS = 10;
+const OVERALL_ANALYSIS_MAX_CHARS = 480;
+const DEFAULT_OVERALL_ANALYSIS =
+  "综合排序待模型返回；当前仅保留策略侧正式信号，交易前需补齐逐标的数据支撑后再排序。";
+const DEFAULT_SIGNAL_ENRICHMENT_FIELD = "模型未返回该标的该项数据支撑。";
+const ENRICHMENT_SECTION_SPECS = [
+  { key: "financialGrowth", label: "财务成长" },
+  { key: "institutionHolderChange", label: "机构持仓" },
+  { key: "marginBalanceChange", label: "融资余额" },
+  { key: "sentimentHeat", label: "舆情/热度" },
+  { key: "informationGaps", label: "信息缺口" },
+  { key: "tradingPrinciples", label: "交易原则检查" },
+] as const;
 
 function resolvePollMs(config?: PatternStrategyPluginConfig) {
   const seconds = config?.asyncPollSeconds;
@@ -422,7 +435,7 @@ export function buildAsyncCompletionEvent(params: {
     `${ASYNC_COMPLETION_EVENT_PREFIX} Pattern Strategy run completed.`,
     "This is an async completion callback, not a new user request.",
     "Do not call messaging delivery tools from this callback; produce the final reply only and the async watcher will deliver it.",
-    "Do not narrate progress, tool usage, or intermediate analysis. Return exactly one final Chinese summary for Feishu.",
+    "Do not narrate progress, tool usage, or intermediate analysis. Return only the requested compact summary object; the async watcher owns the final card/template.",
     `job_id: ${params.watch.jobId}`,
     params.watch.taskKey ? `task_key: ${params.watch.taskKey}` : null,
     `strategy_name_zh: ${resolveStrategyDisplayName(params.watch.taskKey)}`,
@@ -583,7 +596,9 @@ async function fetchTaskDeliveryPolicy(params: {
 
 export const __testing = {
   buildSignalFetchFailureNotification,
-  buildFeishuSignalTablePayload,
+  buildStrategySignalSummaryPayload,
+  extractModelSignalSummary,
+  extractOverallAnalysisText,
   classifySignals,
   fetchRunStatus,
   processPendingWatch,
@@ -667,12 +682,250 @@ function resolveSignalPoint(record: Record<string, unknown> | null, strategyName
   );
 }
 
-function buildFeishuSignalTablePayload(params: {
+type StrategySignalSummaryRow = {
+  symbol: string;
+  name: string;
+  industry: string;
+  signal_date: string;
+  point: string;
+};
+
+type EnrichmentSectionKey = (typeof ENRICHMENT_SECTION_SPECS)[number]["key"];
+
+type SignalEnrichmentSummary = Record<EnrichmentSectionKey, string> & {
+  symbol: string;
+  rank: string;
+  rankingReason: string;
+  dataSupport: string;
+};
+
+type ModelSignalSummary = {
+  overallAnalysis: string;
+  signalEnrichment: SignalEnrichmentSummary[];
+};
+
+function truncateAnalysisText(text: string) {
+  const singleLine = text.replace(/\s+/g, " ").trim();
+  if (singleLine.length <= OVERALL_ANALYSIS_MAX_CHARS) {
+    return singleLine;
+  }
+  return `${singleLine.slice(0, OVERALL_ANALYSIS_MAX_CHARS - 3)}...`;
+}
+
+function stripOverallAnalysisPrefix(text: string) {
+  return text
+    .replace(/^(?:#{1,6}\s*)?(?:\*\*)?(?:总体分析|总体排序分析|综合排序)(?:\*\*)?\s*[:：]?\s*/u, "")
+    .trim();
+}
+
+function isGeneratedTemplateLine(line: string) {
+  const compact = line.replace(/\s+/g, "");
+  if (!compact || compact === "____" || /^[-:|]+$/.test(compact)) {
+    return true;
+  }
+  if (line.startsWith("|") || line.startsWith("```")) {
+    return true;
+  }
+  return /^(?:Enrichment|数据已拉取|现在汇总输出|job[_ -]?id|状态|交易日|扫描范围|信号|记录已写入|无(?:需|需异步).*watcher|策略|任务状态)[:：\s]/iu.test(
+    line,
+  );
+}
+
+function normalizeAnalysisText(text: string | undefined) {
+  const raw = text?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  const unfenced = raw
+    .replace(/^```[a-z0-9_-]*\s*/iu, "")
+    .replace(/```\s*$/u, "")
+    .trim();
+  const explicit =
+    /(?:^|\n)\s*(?:#{1,6}\s*)?(?:\*\*)?(?:总体分析|总体排序分析|综合排序)(?:\*\*)?\s*[:：]\s*([\s\S]*)/u.exec(
+      unfenced,
+    );
+  const candidate = explicit?.[1] ?? unfenced;
+  const lines = candidate
+    .split(/\r?\n/u)
+    .map((line) =>
+      stripOverallAnalysisPrefix(
+        line
+          .replace(/^[-*•]\s*/u, "")
+          .replace(/^\d+[.)、]\s*/u, "")
+          .replace(/^#{1,6}\s*/u, "")
+          .replace(/\*\*/g, "")
+          .trim(),
+      ),
+    )
+    .filter((line) => line && !isGeneratedTemplateLine(line));
+  const normalized = truncateAnalysisText(lines.join(" "));
+  return normalized || undefined;
+}
+
+function readNestedString(record: Record<string, unknown> | null, keys: string[]) {
+  for (const key of keys) {
+    const value = record?.[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function readRankText(record: Record<string, unknown> | null, index: number) {
+  const rankText = readNestedString(record, ["rank", "ranking", "priority"]);
+  if (rankText) {
+    return rankText;
+  }
+  const rankNumber =
+    readNumber(record, "rank") ?? readNumber(record, "ranking") ?? readNumber(record, "priority");
+  return rankNumber !== undefined ? `第${Math.floor(rankNumber)}位` : `第${index + 1}位`;
+}
+
+function extractJsonObject(text: string) {
+  const unfenced = text
+    .trim()
+    .replace(/^```(?:json)?\s*/iu, "")
+    .replace(/```\s*$/u, "")
+    .trim();
+  const start = unfenced.indexOf("{");
+  const end = unfenced.lastIndexOf("}");
+  if (start < 0 || end <= start) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(unfenced.slice(start, end + 1)) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseSignalEnrichmentEntry(entry: unknown, index: number): SignalEnrichmentSummary | null {
+  const record = asRecord(entry);
+  if (!record) {
+    return null;
+  }
+  const symbol = readNestedString(record, ["symbol", "ts_code", "code"]);
+  if (!symbol) {
+    return null;
+  }
+  return {
+    symbol,
+    rank: readRankText(record, index),
+    rankingReason:
+      normalizeAnalysisText(
+        readNestedString(record, ["ranking_reason", "rankingReason", "rank_reason", "summary"]),
+      ) ?? DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    dataSupport:
+      normalizeAnalysisText(
+        readNestedString(record, ["data_support", "dataSupport", "evidence", "data_points"]),
+      ) ?? DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    financialGrowth:
+      normalizeAnalysisText(readNestedString(record, ["financial_growth", "financialGrowth"])) ??
+      DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    institutionHolderChange:
+      normalizeAnalysisText(
+        readNestedString(record, [
+          "institution_holder_change",
+          "institutionHolderChange",
+          "institutional_holders",
+        ]),
+      ) ?? DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    marginBalanceChange:
+      normalizeAnalysisText(
+        readNestedString(record, [
+          "margin_balance_change",
+          "marginBalanceChange",
+          "margin_balance",
+        ]),
+      ) ?? DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    sentimentHeat:
+      normalizeAnalysisText(
+        readNestedString(record, ["sentiment_heat", "sentimentHeat", "heat"]),
+      ) ?? DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    informationGaps:
+      normalizeAnalysisText(
+        readNestedString(record, ["information_gaps", "informationGaps", "gaps"]),
+      ) ?? DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    tradingPrinciples:
+      normalizeAnalysisText(
+        readNestedString(record, ["trading_principles", "tradingPrinciples", "principles"]),
+      ) ?? DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+  };
+}
+
+function extractStructuredSignalEnrichment(root: Record<string, unknown>) {
+  const source = Array.isArray(root.signal_enrichment)
+    ? root.signal_enrichment
+    : Array.isArray(root.canslim_enrichment)
+      ? root.canslim_enrichment
+      : Array.isArray(root.enrichment)
+        ? root.enrichment
+        : [];
+  return source
+    .map((entry, index) => parseSignalEnrichmentEntry(entry, index))
+    .filter((entry): entry is SignalEnrichmentSummary => Boolean(entry));
+}
+
+function parseStructuredModelSummary(text: string): ModelSignalSummary | undefined {
+  const parsed = extractJsonObject(text);
+  const root = asRecord(parsed);
+  if (!root) {
+    return undefined;
+  }
+  return {
+    overallAnalysis:
+      normalizeAnalysisText(
+        readNestedString(root, [
+          "overall_ranking",
+          "overallRanking",
+          "overall_analysis",
+          "overallAnalysis",
+          "ranking_result",
+        ]),
+      ) ?? DEFAULT_OVERALL_ANALYSIS,
+    signalEnrichment: extractStructuredSignalEnrichment(root),
+  };
+}
+
+function parseLooseModelSummary(text: string): ModelSignalSummary | undefined {
+  const overallAnalysis = normalizeAnalysisText(text);
+  if (!overallAnalysis) {
+    return undefined;
+  }
+  return { overallAnalysis, signalEnrichment: [] };
+}
+
+function extractModelSignalSummary(payloads: ReplyPayload[]): ModelSignalSummary {
+  for (const payload of payloads) {
+    const raw = payload.text?.trim();
+    if (!raw) {
+      continue;
+    }
+    const structured = parseStructuredModelSummary(raw);
+    if (structured) {
+      return structured;
+    }
+    const loose = parseLooseModelSummary(raw);
+    if (loose) {
+      return loose;
+    }
+  }
+  return {
+    overallAnalysis: DEFAULT_OVERALL_ANALYSIS,
+    signalEnrichment: [],
+  };
+}
+
+function extractOverallAnalysisText(payloads: ReplyPayload[]) {
+  return extractModelSignalSummary(payloads).overallAnalysis;
+}
+
+function buildSignalSummaryRows(params: {
   watch: PatternStrategyAsyncWatch;
-  runData: Record<string, unknown> | null;
   signals: unknown[];
-}): ReplyPayload | undefined {
-  const rows = params.signals.slice(0, 10).map((signal) => {
+}): StrategySignalSummaryRow[] {
+  return params.signals.slice(0, MAX_SIGNAL_CARD_ROWS).map((signal) => {
     const record = asRecord(signal);
     return {
       symbol: trimForCell(record?.symbol ?? record?.ts_code ?? record?.code),
@@ -684,6 +937,123 @@ function buildFeishuSignalTablePayload(params: {
       ),
     };
   });
+}
+
+function resolveStatusLabel(runData: Record<string, unknown> | null) {
+  const status = typeof runData?.status === "string" ? runData.status.trim().toLowerCase() : "";
+  switch (status) {
+    case "succeeded":
+    case "success":
+    case "completed":
+      return "成功";
+    case "failed":
+      return "失败";
+    case "":
+      return "已完成";
+    default:
+      return status;
+  }
+}
+
+function defaultSignalEnrichment(
+  row: StrategySignalSummaryRow,
+  index: number,
+): SignalEnrichmentSummary {
+  return {
+    symbol: row.symbol,
+    rank: `第${index + 1}位`,
+    rankingReason: DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    dataSupport: DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    financialGrowth: DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    institutionHolderChange: DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    marginBalanceChange: DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    sentimentHeat: DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    informationGaps: DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+    tradingPrinciples: DEFAULT_SIGNAL_ENRICHMENT_FIELD,
+  };
+}
+
+function resolveSignalEnrichmentRows(
+  rows: StrategySignalSummaryRow[],
+  signalEnrichment: SignalEnrichmentSummary[],
+) {
+  const bySymbol = new Map(
+    signalEnrichment
+      .filter((entry) => entry.symbol.trim())
+      .map((entry) => [entry.symbol.trim().toUpperCase(), entry]),
+  );
+  return rows.map((row, index) => {
+    const matched = bySymbol.get(row.symbol.trim().toUpperCase()) ?? signalEnrichment[index];
+    return {
+      ...defaultSignalEnrichment(row, index),
+      ...(matched ?? {}),
+      symbol: row.symbol,
+    };
+  });
+}
+
+function formatPerSignalEnrichment(signalEnrichment: SignalEnrichmentSummary[]) {
+  return signalEnrichment
+    .map((entry) => {
+      const sections = ENRICHMENT_SECTION_SPECS.map(
+        (section) => `${section.label}：${entry[section.key]}`,
+      );
+      return [
+        `${entry.rank} ${entry.symbol}：${entry.rankingReason}`,
+        `数据支撑：${entry.dataSupport}`,
+        ...sections,
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+function formatStrategySignalSummaryText(params: {
+  watch: PatternStrategyAsyncWatch;
+  runData: Record<string, unknown> | null;
+  rows: StrategySignalSummaryRow[];
+  overallAnalysis: string;
+  signalEnrichment: SignalEnrichmentSummary[];
+}) {
+  const strategyName = resolveStrategyDisplayName(params.watch.taskKey);
+  const signalDate = resolveNotificationSignalDate({
+    runData: params.runData,
+    watch: params.watch,
+    signals: params.rows,
+  });
+  const lines: Array<string | null> = [
+    `${strategyName}信号已完成。`,
+    "",
+    `策略：${strategyName}`,
+    `状态：${resolveStatusLabel(params.runData)}`,
+    `Job ID：${params.watch.jobId}`,
+    signalDate ? `信号日：${signalDate}` : null,
+    `信号数：${params.rows.length}`,
+    "",
+    "信号列表：",
+    ...params.rows.map(
+      (row, index) =>
+        `${index + 1}. ${row.symbol}｜${row.name}｜${row.industry}｜信号日 ${row.signal_date}｜${row.point}`,
+    ),
+    "",
+    "逐标的 CANSLIM 分析：",
+    formatPerSignalEnrichment(params.signalEnrichment),
+    "",
+    `总体排序分析：${params.overallAnalysis}`,
+    "",
+    "说明：以上为策略侧正式信号，交易前仍需结合量价延续、基本面和交易原则复核。",
+  ];
+  return lines.filter((line): line is string => line !== null).join("\n");
+}
+
+function buildStrategySignalSummaryPayload(params: {
+  watch: PatternStrategyAsyncWatch;
+  runData: Record<string, unknown> | null;
+  signals: unknown[];
+  overallAnalysis: string;
+  signalEnrichment: SignalEnrichmentSummary[];
+  includeFeishuCard?: boolean;
+}): ReplyPayload | undefined {
+  const rows = buildSignalSummaryRows({ watch: params.watch, signals: params.signals });
   if (rows.length === 0) {
     return undefined;
   }
@@ -693,66 +1063,109 @@ function buildFeishuSignalTablePayload(params: {
     watch: params.watch,
     signals: params.signals,
   });
-  const title = `${strategyName}｜最新信号`;
-  const fallbackText = rows
-    .map(
-      (row) =>
-        `${row.symbol} ${row.name} 行业:${row.industry} 信号日:${row.signal_date} 要点:${row.point}`,
-    )
-    .join("\n");
+  const title = `${strategyName}｜策略信号`;
+  const statusLabel = resolveStatusLabel(params.runData);
+  const fallbackText = formatStrategySignalSummaryText({
+    watch: params.watch,
+    runData: params.runData,
+    rows,
+    overallAnalysis: params.overallAnalysis,
+    signalEnrichment: resolveSignalEnrichmentRows(rows, params.signalEnrichment),
+  });
+  const signalEnrichmentRows = resolveSignalEnrichmentRows(rows, params.signalEnrichment);
 
   return {
     text: fallbackText,
-    channelData: {
-      feishu: {
-        card: {
-          schema: "2.0",
-          config: { wide_screen_mode: true },
-          header: {
-            template: "blue",
-            title: { tag: "plain_text", content: title },
-          },
-          body: {
-            elements: [
-              {
-                tag: "markdown",
-                content: signalDate
-                  ? `**信号日：${signalDate}**`
-                  : `**Job ID：${params.watch.jobId}**`,
-              },
-              {
-                tag: "table",
-                element_id: "signal_table",
-                page_size: Math.min(10, Math.max(1, rows.length)),
-                row_height: "auto",
-                freeze_first_column: true,
-                header_style: {
-                  text_align: "left",
-                  text_size: "normal",
-                  background_style: "grey",
-                  text_color: "default",
-                  bold: true,
-                  lines: 1,
+    ...(params.includeFeishuCard
+      ? {
+          channelData: {
+            feishu: {
+              card: {
+                schema: "2.0",
+                config: { width_mode: "fill" },
+                header: {
+                  template: "green",
+                  title: { tag: "plain_text", content: title },
                 },
-                columns: [
-                  { name: "symbol", display_name: "代码", data_type: "text", width: "100px" },
-                  { name: "name", display_name: "名称", data_type: "text", width: "100px" },
-                  { name: "industry", display_name: "行业", data_type: "text", width: "120px" },
-                  {
-                    name: "signal_date",
-                    display_name: "信号日",
-                    data_type: "text",
-                    width: "110px",
-                  },
-                  { name: "point", display_name: "要点", data_type: "text", width: "auto" },
-                ],
-                rows,
+                body: {
+                  elements: [
+                    {
+                      tag: "markdown",
+                      content: [
+                        `**策略**：${strategyName}`,
+                        `**状态**：${statusLabel}`,
+                        `**Job ID**：${params.watch.jobId}`,
+                        signalDate ? `**信号日**：${signalDate}` : null,
+                        `**信号数**：${rows.length}`,
+                      ]
+                        .filter(Boolean)
+                        .join("\n"),
+                    },
+                    {
+                      tag: "table",
+                      element_id: "signal_table",
+                      page_size: Math.min(MAX_SIGNAL_CARD_ROWS, Math.max(1, rows.length)),
+                      row_height: "auto",
+                      freeze_first_column: true,
+                      header_style: {
+                        text_align: "left",
+                        text_size: "normal",
+                        background_style: "grey",
+                        text_color: "default",
+                        bold: true,
+                        lines: 1,
+                      },
+                      columns: [
+                        {
+                          name: "symbol",
+                          display_name: "代码",
+                          data_type: "text",
+                          width: "100px",
+                        },
+                        {
+                          name: "name",
+                          display_name: "名称",
+                          data_type: "text",
+                          width: "100px",
+                        },
+                        {
+                          name: "industry",
+                          display_name: "行业",
+                          data_type: "text",
+                          width: "120px",
+                        },
+                        {
+                          name: "signal_date",
+                          display_name: "信号日",
+                          data_type: "text",
+                          width: "110px",
+                        },
+                        { name: "point", display_name: "要点", data_type: "text", width: "auto" },
+                      ],
+                      rows,
+                    },
+                    {
+                      tag: "markdown",
+                      content: `**逐标的 CANSLIM 分析**\n${formatPerSignalEnrichment(
+                        signalEnrichmentRows,
+                      )}`,
+                    },
+                    {
+                      tag: "markdown",
+                      content: `**总体排序分析**\n${params.overallAnalysis}`,
+                    },
+                    {
+                      tag: "markdown",
+                      content:
+                        "说明：以上为策略侧正式信号，交易前仍需结合量价延续、基本面和交易原则复核。",
+                    },
+                  ],
+                },
               },
-            ],
+            },
           },
-        },
-      },
-    },
+        }
+      : {}),
   };
 }
 
@@ -932,42 +1345,58 @@ async function runActionableSignalCallback(params: {
     },
     params.api.config,
   );
-  const payloads = normalizeReplyPayloads(reply);
-  const signalTablePayload =
-    channel === "feishu"
-      ? buildFeishuSignalTablePayload({
-          watch: params.watch,
-          runData: params.runData,
-          signals: params.signals,
-        })
-      : undefined;
-  const deliveryPayloads = signalTablePayload ? [signalTablePayload, ...payloads] : payloads;
+  const modelPayloads = normalizeReplyPayloads(reply);
+  const modelSummary = extractModelSignalSummary(modelPayloads);
+  const summaryPayload = buildStrategySignalSummaryPayload({
+    watch: params.watch,
+    runData: params.runData,
+    signals: params.signals,
+    overallAnalysis: modelSummary.overallAnalysis,
+    signalEnrichment: modelSummary.signalEnrichment,
+    includeFeishuCard: channel === "feishu",
+  });
+  const deliveryPayloads = summaryPayload ? [summaryPayload] : modelPayloads;
   if (deliveryPayloads.length === 0) {
     return { deliveryStatus: "not-delivered" as const, callbackSessionKey };
   }
 
-  const results = await deliverOutboundPayloads({
+  const session = buildOutboundSessionContext({
     cfg: params.api.config,
-    channel,
-    to,
-    accountId: params.watch.deliverySnapshot?.accountId,
-    payloads: deliveryPayloads,
-    session: buildOutboundSessionContext({
-      cfg: params.api.config,
-      agentId: params.watch.agentId,
-      sessionKey: callbackSessionKey,
-    }),
-    identity: resolveAgentOutboundIdentity(params.api.config, params.watch.agentId),
-    bestEffort: true,
-    mirror: {
-      sessionKey: callbackSessionKey,
-      agentId: params.watch.agentId,
-      text: deliveryPayloads
-        .map((payload) => payload.text)
-        .filter((text): text is string => Boolean(text?.trim()))
-        .join("\n\n"),
-    },
+    agentId: params.watch.agentId,
+    sessionKey: callbackSessionKey,
   });
+  const identity = resolveAgentOutboundIdentity(params.api.config, params.watch.agentId);
+  const mirrorTextForPayloads = (payloads: ReplyPayload[]) =>
+    payloads
+      .map((payload) => payload.text)
+      .filter((text): text is string => Boolean(text?.trim()))
+      .join("\n\n");
+  const deliverPayloadBatch = async (payloads: ReplyPayload[]) =>
+    await deliverOutboundPayloads({
+      cfg: params.api.config,
+      channel,
+      to,
+      accountId: params.watch.deliverySnapshot?.accountId,
+      payloads,
+      session,
+      identity,
+      bestEffort: true,
+      mirror: {
+        sessionKey: callbackSessionKey,
+        agentId: params.watch.agentId,
+        text: mirrorTextForPayloads(payloads),
+      },
+    });
+
+  let results = await deliverPayloadBatch(deliveryPayloads);
+  if (
+    results.length === 0 &&
+    channel === "feishu" &&
+    summaryPayload?.channelData &&
+    summaryPayload.text?.trim()
+  ) {
+    results = await deliverPayloadBatch([{ text: summaryPayload.text }]);
+  }
   return {
     deliveryStatus: results.length > 0 ? ("delivered" as const) : ("not-delivered" as const),
     callbackSessionKey,

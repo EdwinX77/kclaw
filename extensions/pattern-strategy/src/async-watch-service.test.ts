@@ -203,23 +203,93 @@ describe("Pattern Strategy async watch notifications", () => {
 
     expect(event).toContain("Required skill: canslim-enrichment");
     expect(event).toContain("Do not call messaging delivery tools from this callback");
-    expect(event).toContain("Return exactly one final Chinese summary for Feishu");
+    expect(event).toContain("Return only the requested compact summary object");
     expect(event).toContain("Do not narrate your process");
     expect(event).toContain("Market timezone: Asia/Shanghai");
     expect(event).toContain("Do not submit a new strategy task from this callback.");
-    expect(event).toContain("Final Feishu reply must use these sections exactly");
+    expect(event).toContain("Final reply contract: output exactly one compact JSON object");
+    expect(event).toContain('"signal_enrichment"');
+    expect(event).toContain("one independent analysis object per formal signal symbol");
+    expect(event).toContain("overall_ranking must summarize the composite ranking");
+    expect(event).toContain(
+      "The async watcher owns the Feishu card, per-symbol CANSLIM section labels",
+    );
     expect(event).toContain("Strategy construction confidentiality");
     expect(event).toContain("这类问题不予回复。");
-    expect(event).toContain("交易原则检查");
     expect(event).toContain("trading_principles_json");
     expect(event).not.toContain("resolved_window:");
     expect(event).not.toContain('"confidence"');
   });
 
-  it("builds Feishu signal table cards for actionable callback delivery", () => {
-    const payload = __testing.buildFeishuSignalTablePayload({
+  it("extracts overall analysis while dropping generated template noise", () => {
+    expect(
+      __testing.extractOverallAnalysisText([
+        {
+          text: [
+            "Enrichment 数据已拉取。现在汇总输出。",
+            "",
+            "| 代码 | 名称 |",
+            "| ---- | ---- |",
+            "| 002669.SZ | 康达新材 |",
+            "",
+            "总体分析：本批信号的量价结构较活跃，但基本面验证仍需跟进，仓位上应等待回踩确认。",
+          ].join("\n"),
+        },
+      ]),
+    ).toBe("本批信号的量价结构较活跃，但基本面验证仍需跟进，仓位上应等待回踩确认。");
+  });
+
+  it("extracts structured CANSLIM enrichment from model callback output", () => {
+    const summary = __testing.extractModelSignalSummary([
+      {
+        text: JSON.stringify({
+          overall_ranking:
+            "综合排序：1）002669.SZ 数据支撑最完整；2）603928.SH 资金改善但财务确认不足。",
+          signal_enrichment: [
+            {
+              symbol: "002669.SZ",
+              rank: 1,
+              ranking_reason: "量价突破与融资余额改善同时出现，排第一。",
+              data_support: "财务成长取 2026Q1 收入同比 +18%，融资余额近5日 +6.2%。",
+              financial_growth: "2026Q1 收入同比 +18%，扣非利润同比 +11%。",
+              institution_holder_change: "最新前十大流通股东机构持股环比 +1.4pct。",
+              margin_balance_change: "融资余额近5日 +6.2%，资金参与度改善。",
+              sentiment_heat: "近3日公告与行业新闻热度中性偏强。",
+              information_gaps: "缺少最新订单分产品拆分。",
+              trading_principles: "等待回踩不破突破位后再评估。",
+            },
+            {
+              symbol: "603928.SH",
+              rank: 2,
+              ranking_reason: "资金改善存在，但财务成长确认弱于第一名。",
+              data_support: "融资余额近5日 +3.1%，机构持仓暂无连续增持数据。",
+              financial_growth: "2026Q1 收入同比 +7%，利润增速低于收入。",
+              institution_holder_change: "机构持仓暂无连续增持证据。",
+              margin_balance_change: "融资余额近5日 +3.1%。",
+              sentiment_heat: "舆情热度中性。",
+              information_gaps: "缺少最新毛利率变化。",
+              trading_principles: "只在放量延续后纳入观察。",
+            },
+          ],
+        }),
+      },
+    ]);
+
+    expect(summary.overallAnalysis).toContain("1）002669.SZ 数据支撑最完整");
+    expect(summary.signalEnrichment).toHaveLength(2);
+    expect(summary.signalEnrichment[0]).toMatchObject({
+      symbol: "002669.SZ",
+      rank: "第1位",
+      rankingReason: "量价突破与融资余额改善同时出现，排第一。",
+      dataSupport: "财务成长取 2026Q1 收入同比 +18%，融资余额近5日 +6.2%。",
+      financialGrowth: "2026Q1 收入同比 +18%，扣非利润同比 +11%。",
+    });
+  });
+
+  it("builds standardized Feishu signal summary cards for actionable callback delivery", () => {
+    const payload = __testing.buildStrategySignalSummaryPayload({
       watch: createWatch("strategy.strong_pivot_breakout.daily_scan"),
-      runData: { resolved_window: { end_date: "2026-05-27" } },
+      runData: { status: "succeeded", resolved_window: { end_date: "2026-05-27" } },
       signals: [
         {
           symbol: "002669.SZ",
@@ -229,16 +299,40 @@ describe("Pattern Strategy async watch notifications", () => {
           comment: "强枢轴突破，量价结构转强。",
         },
       ],
+      overallAnalysis: "综合排序：1）002669.SZ 数据支撑最完整，优先级最高。",
+      signalEnrichment: [
+        {
+          symbol: "002669.SZ",
+          rank: "第1位",
+          rankingReason: "量价突破叠加融资余额改善，排序第一。",
+          dataSupport: "2026Q1 收入同比 +18%，融资余额近5日 +6.2%。",
+          financialGrowth: "2026Q1 收入同比 +18%，扣非利润同比 +11%。",
+          institutionHolderChange: "最新机构持仓环比 +1.4pct。",
+          marginBalanceChange: "融资余额近5日 +6.2%。",
+          sentimentHeat: "近3日行业热度中性偏强。",
+          informationGaps: "缺少最新订单拆分。",
+          tradingPrinciples: "等待回踩确认，不追高。",
+        },
+      ],
+      includeFeishuCard: true,
     });
 
-    expect(payload?.text).toContain("002669.SZ 康达新材");
+    expect(payload?.text).toContain("策略：强势枢轴突破策略");
+    expect(payload?.text).toContain("逐标的 CANSLIM 分析：");
+    expect(payload?.text).toContain("第1位 002669.SZ：量价突破叠加融资余额改善，排序第一。");
+    expect(payload?.text).toContain("数据支撑：2026Q1 收入同比 +18%，融资余额近5日 +6.2%。");
+    expect(payload?.text).toContain("总体排序分析：综合排序：1）002669.SZ");
     expect(payload?.channelData?.feishu).toBeTruthy();
     const card = (payload?.channelData?.feishu as { card?: Record<string, unknown> }).card;
     expect(card?.schema).toBe("2.0");
     expect(card?.header).toMatchObject({
-      title: { content: "强势枢轴突破策略｜最新信号" },
+      title: { content: "强势枢轴突破策略｜策略信号" },
     });
     const elements = (card?.body as { elements?: Array<Record<string, unknown>> }).elements ?? [];
+    expect(elements[0]).toMatchObject({
+      tag: "markdown",
+      content: expect.stringContaining("**状态**：成功"),
+    });
     const table = elements.find((element) => element.tag === "table");
     expect(table).toMatchObject({
       tag: "table",
@@ -251,6 +345,14 @@ describe("Pattern Strategy async watch notifications", () => {
           point: "强枢轴突破，量价结构转强。",
         },
       ],
+    });
+    expect(elements.at(-3)).toMatchObject({
+      tag: "markdown",
+      content: expect.stringContaining("**逐标的 CANSLIM 分析**"),
+    });
+    expect(elements.at(-2)).toMatchObject({
+      tag: "markdown",
+      content: expect.stringContaining("**总体排序分析**"),
     });
   });
 });

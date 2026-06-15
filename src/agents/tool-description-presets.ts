@@ -53,6 +53,7 @@ export function describeSessionsSpawnTool(options?: {
     "Subagents inherit parent workspace.",
     "Native subagents get task in first visible `[Subagent Task]` message.",
     'Native only: `context="fork"` only when child needs current transcript; else omit or `isolated`.',
+    "`expectsCompletionMessage=false` suppresses automatic completion delivery for internal setup work.",
     "Use for fresh child-session work.",
   ];
   if (options?.acpAvailable === false) {

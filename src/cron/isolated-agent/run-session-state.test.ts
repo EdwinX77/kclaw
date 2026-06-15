@@ -8,6 +8,7 @@ import type { SessionEntry } from "../../config/sessions.js";
 import {
   adoptCronRunSessionMetadata,
   createPersistCronSessionEntry,
+  seedCronSessionDeliveryContext,
   type MutableCronSession,
 } from "./run-session-state.js";
 
@@ -213,6 +214,102 @@ describe("createPersistCronSessionEntry", () => {
       updatedAt: 1000,
       systemSent: true,
     });
+  });
+});
+
+describe("seedCronSessionDeliveryContext", () => {
+  it("mirrors resolved cron delivery into canonical and legacy session fields", () => {
+    const entry = makeSessionEntry();
+
+    expect(
+      seedCronSessionDeliveryContext({
+        entry,
+        resolvedDelivery: {
+          ok: true,
+          channel: "feishu",
+          to: "user:ou_123",
+          accountId: "main",
+          threadId: "thread-1",
+        },
+      }),
+    ).toBe(true);
+
+    expect(entry.deliveryContext).toEqual({
+      channel: "feishu",
+      to: "user:ou_123",
+      accountId: "main",
+      threadId: "thread-1",
+    });
+    expect(entry.lastChannel).toBe("feishu");
+    expect(entry.lastTo).toBe("user:ou_123");
+    expect(entry.lastAccountId).toBe("main");
+    expect(entry.lastThreadId).toBe("thread-1");
+    expect(entry.route).toEqual({
+      channel: "feishu",
+      target: { to: "user:ou_123" },
+      accountId: "main",
+      thread: { id: "thread-1" },
+    });
+  });
+
+  it("drops stale account and thread fields when the current delivery lacks them", () => {
+    const entry = makeSessionEntry({
+      deliveryContext: {
+        channel: "feishu",
+        to: "user:old",
+        accountId: "stale-account",
+        threadId: "stale-thread",
+      },
+      lastChannel: "feishu" as never,
+      lastTo: "user:old",
+      lastAccountId: "stale-account",
+      lastThreadId: "stale-thread",
+    });
+
+    expect(
+      seedCronSessionDeliveryContext({
+        entry,
+        resolvedDelivery: {
+          ok: true,
+          channel: "feishu",
+          to: "user:ou_new",
+        },
+      }),
+    ).toBe(true);
+
+    expect(entry.deliveryContext).toEqual({
+      channel: "feishu",
+      to: "user:ou_new",
+    });
+    expect(entry.lastChannel).toBe("feishu");
+    expect(entry.lastTo).toBe("user:ou_new");
+    expect(entry.lastAccountId).toBeUndefined();
+    expect(entry.lastThreadId).toBeUndefined();
+  });
+
+  it("leaves the session untouched when delivery did not resolve", () => {
+    const entry = makeSessionEntry({
+      deliveryContext: { channel: "feishu", to: "user:ou_existing" },
+      lastChannel: "feishu" as never,
+      lastTo: "user:ou_existing",
+    });
+
+    expect(
+      seedCronSessionDeliveryContext({
+        entry,
+        resolvedDelivery: {
+          ok: false,
+          channel: "feishu",
+          to: "user:ou_new",
+        },
+      }),
+    ).toBe(false);
+
+    expect(entry.deliveryContext).toEqual({
+      channel: "feishu",
+      to: "user:ou_existing",
+    });
+    expect(entry.lastTo).toBe("user:ou_existing");
   });
 });
 
