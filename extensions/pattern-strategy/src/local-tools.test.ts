@@ -1,11 +1,12 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "../../../src/plugins/types.js";
 import { getAsyncWatch } from "./async-watch-store.js";
 import { getIndiceAsyncWatch } from "./indice-watch-store.js";
 import { createPatternStrategyLocalTools } from "./local-tools.js";
+import { shiftMarketDateByMonths } from "./market-calendar.js";
 
 let tmpDir: string;
 let previousStateDir: string | undefined;
@@ -53,6 +54,22 @@ function createApi(storePath: string): OpenClawPluginApi {
   } as unknown as OpenClawPluginApi;
 }
 
+function latestTradeDateResponse(tradeDate = "2026-05-29") {
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      tool_name: "market.latest_available_trade_date",
+      data: {
+        trade_date: tradeDate,
+        is_trading_day: true,
+        data_ready: true,
+        previous_trade_date: "2026-05-28",
+        source: "market_calendar",
+      },
+    }),
+  );
+}
+
 describe("Pattern Strategy local watch tools", () => {
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pattern-strategy-tools-"));
@@ -61,6 +78,7 @@ describe("Pattern Strategy local watch tools", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     if (previousStateDir === undefined) {
       delete process.env.OPENCLAW_STATE_DIR;
     } else {
@@ -69,7 +87,12 @@ describe("Pattern Strategy local watch tools", () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
+  it("clamps board-index refresh windows to the target month", () => {
+    expect(shiftMarketDateByMonths("2026-05-31", -3)).toBe("2026-02-28");
+  });
+
   it("ignores bogus session keys and preserves enrichment for daily scans", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(latestTradeDateResponse());
     const sessionKey = "agent:tas-dispatch:cron:mid-term-accel";
     const storePath = await writeSessionStore(sessionKey);
     const ctx: OpenClawPluginToolContext = {
@@ -109,12 +132,66 @@ describe("Pattern Strategy local watch tools", () => {
     expect(parsed.watch.market_date).toBe("2026-05-29");
     expect(parsed.watch.enrich_signals).toBe(true);
     expect(parsed.watch.max_signals).toBe(20);
-    expect(parsed.watch.delivery_snapshot.lastTo).toBe("oc_group");
+    expect(parsed.watch.delivery_snapshot.to).toBe("oc_group");
 
     const watch = await getAsyncWatch({ stateDir: tmpDir, jobId: "claw_test" });
     expect(watch?.followupMode).toBe("direct-agent-delivery");
     expect(watch?.idempotencyKey).toBe("cron-mid-term-accel-2026-05-29");
     expect(watch?.traceId).toBe("trace-watch-1");
+  });
+
+  it("normalizes stale cron watch keys to the backend trade date", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(latestTradeDateResponse("2026-06-15"));
+    const sessionKey = "agent:tas-dispatch:cron:strong-pivot";
+    const storePath = await writeSessionStore(sessionKey);
+    const ctx: OpenClawPluginToolContext = {
+      config: { session: { store: storePath } },
+      agentId: "tas-dispatch",
+      sessionKey,
+      deliveryContext: {
+        channel: "feishu",
+        to: "user:ou_market",
+        accountId: "main",
+        threadId: "thread-strong-pivot",
+      },
+    };
+    const api = createApi(storePath);
+    const tool = createPatternStrategyLocalTools(api, ctx).find(
+      (candidate) => candidate.name === "strategy_watch_run",
+    );
+    if (!tool) {
+      throw new Error("missing strategy_watch_run");
+    }
+
+    const result = await tool.execute("call-stale-watch", {
+      job_id: "claw_strong_pivot",
+      task_key: "strategy.strong_pivot_breakout.daily_scan",
+      idempotency_key: "cron-strong-pivot-breakout-2026-06-12",
+      request_key:
+        "strategy.strong_pivot_breakout.daily_scan:cron-strong-pivot-breakout-2026-06-12",
+      source: "openclaw_cron",
+      requested_by: "openclaw_gateway",
+      trace_id: "cron:strong-pivot:2026-06-12",
+      trigger_type: "cron",
+    });
+    const parsed = JSON.parse(result.content[0]!.text);
+
+    expect(parsed.watch).toMatchObject({
+      idempotency_key: "cron-strong-pivot-breakout-2026-06-15",
+      trace_id: "cron:strong-pivot:2026-06-15",
+      market_date: "2026-06-15",
+      delivery_snapshot: {
+        channel: "feishu",
+        to: "user:ou_market",
+        accountId: "main",
+        threadId: "thread-strong-pivot",
+      },
+    });
+
+    const watch = await getAsyncWatch({ stateDir: tmpDir, jobId: "claw_strong_pivot" });
+    expect(watch?.requestKey).toBe(
+      "strategy.strong_pivot_breakout.daily_scan:cron-strong-pivot-breakout-2026-06-15",
+    );
   });
 
   it("forces enrichment for strong pivot breakout daily scan watches", async () => {
@@ -154,6 +231,12 @@ describe("Pattern Strategy local watch tools", () => {
       config: { session: { store: storePath } },
       agentId: "tas-dispatch",
       sessionKey,
+      deliveryContext: {
+        channel: "feishu",
+        to: "user:ou_market",
+        accountId: "main",
+        threadId: "thread-board-index",
+      },
     };
     const api = createApi(storePath);
     const tool = createPatternStrategyLocalTools(api, ctx).find(
@@ -172,11 +255,20 @@ describe("Pattern Strategy local watch tools", () => {
     const parsed = JSON.parse(result.content[0]!.text);
 
     expect(parsed.watch.session_key).toBe(sessionKey);
-    expect(parsed.watch.delivery_snapshot.lastChannel).toBe("feishu");
-    expect(parsed.watch.delivery_snapshot.lastTo).toBe("oc_group");
+    expect(parsed.watch.delivery_snapshot).toEqual({
+      channel: "feishu",
+      to: "user:ou_market",
+      accountId: "main",
+      threadId: "thread-board-index",
+    });
 
     const watch = await getIndiceAsyncWatch({ stateDir: tmpDir, jobId: "indice_job_1" });
     expect(watch?.source).toBe("openclaw_cron");
-    expect(watch?.deliverySnapshot?.to).toBe("oc_group");
+    expect(watch?.deliverySnapshot).toEqual({
+      channel: "feishu",
+      to: "user:ou_market",
+      accountId: "main",
+      threadId: "thread-board-index",
+    });
   });
 });

@@ -49,6 +49,7 @@ import { defaultRuntime } from "../runtime.js";
 import { parseAgentSessionKey } from "../sessions/session-key-utils.js";
 import {
   dispatchGatewayCronFinishedNotifications,
+  dispatchGatewayCronStartedNotifications,
   sendGatewayCronFailureAlert,
 } from "./server-cron-notifications.js";
 
@@ -571,6 +572,15 @@ export function buildGatewayCronService(params: {
         ]),
       };
       runCronChangedHook(hookEvt);
+      if (evt.action === "started") {
+        dispatchGatewayCronStartedNotifications({
+          evt,
+          job: jobSnapshot,
+          deps: params.deps,
+          logger: cronLogger,
+          resolveCronAgent,
+        });
+      }
       if (evt.action === "finished") {
         const job = evt.job ?? cron.getJob(evt.jobId);
         dispatchGatewayCronFinishedNotifications({

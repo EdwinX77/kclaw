@@ -6,6 +6,10 @@ import {
 } from "../../../src/infra/heartbeat-runner.js";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "../../../src/plugins/types.js";
 import {
+  schedulePatternIndiceWatchNow,
+  schedulePatternStrategyWatchNow,
+} from "./async-watch-service.js";
+import {
   getAsyncWatch,
   listAsyncWatches,
   removeAsyncWatch,
@@ -20,6 +24,7 @@ import {
   type AutomationRunRecord,
   type AutomationRunFilter,
 } from "./automation-run-store.js";
+import type { PatternStrategyPluginConfig } from "./client.js";
 import {
   getIndiceAsyncWatch,
   listIndiceAsyncWatches,
@@ -27,8 +32,12 @@ import {
   type IndiceRefreshAsyncWatch,
   upsertIndiceAsyncWatch,
 } from "./indice-watch-store.js";
+import { resolveLatestAvailableTradeDate } from "./market-calendar.js";
 import { extractMarketDateText, MARKET_TIMEZONE } from "./model-boundary-harness.js";
-import { resolveSubmissionMarketDate } from "./strategy-submission.js";
+import {
+  normalizeCronStrategyWatchParams,
+  resolveSubmissionMarketDate,
+} from "./strategy-submission.js";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: "object",
@@ -60,34 +69,105 @@ type LocalToolDef = {
   ) => Promise<ToolResult>;
 };
 
-type SessionDeliverySnapshot = {
-  lastChannel?: unknown;
-  lastTo?: unknown;
-  lastAccountId?: unknown;
+type CompletionDeliverySnapshot = {
+  channel?: string;
+  to?: string;
+  accountId?: string;
+  threadId?: string | number;
 };
+
+function readOptionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readOptionalThreadId(value: unknown) {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function compactDeliverySnapshot(
+  snapshot: CompletionDeliverySnapshot,
+): CompletionDeliverySnapshot | undefined {
+  const compacted: CompletionDeliverySnapshot = {
+    ...(snapshot.channel ? { channel: snapshot.channel } : {}),
+    ...(snapshot.to ? { to: snapshot.to } : {}),
+    ...(snapshot.accountId ? { accountId: snapshot.accountId } : {}),
+    ...(snapshot.threadId !== undefined ? { threadId: snapshot.threadId } : {}),
+  };
+  return compacted.channel ||
+    compacted.to ||
+    compacted.accountId ||
+    compacted.threadId !== undefined
+    ? compacted
+    : undefined;
+}
+
+function resolveContextDeliverySnapshot(
+  ctx: OpenClawPluginToolContext,
+): CompletionDeliverySnapshot | undefined {
+  return compactDeliverySnapshot({
+    channel:
+      readOptionalString(ctx.deliveryContext?.channel) ?? readOptionalString(ctx.messageChannel),
+    to: readOptionalString(ctx.deliveryContext?.to),
+    accountId:
+      readOptionalString(ctx.deliveryContext?.accountId) ?? readOptionalString(ctx.agentAccountId),
+    threadId: readOptionalThreadId(ctx.deliveryContext?.threadId),
+  });
+}
 
 function resolveSessionDeliverySnapshot(params: {
   ctx: OpenClawPluginToolContext;
   sessionKey?: string;
   agentId?: string;
-}): SessionDeliverySnapshot {
+}): CompletionDeliverySnapshot | undefined {
   const sessionKey = params.sessionKey?.trim() || params.ctx.sessionKey?.trim();
   if (!sessionKey) {
-    return {};
+    return undefined;
   }
   const agentId = params.agentId?.trim() || params.ctx.agentId?.trim();
   const storePath = resolveStorePath(params.ctx.config?.session?.store, { agentId });
   try {
-    const store = loadSessionStore(storePath);
+    const store = loadSessionStore(storePath) as Record<string, unknown>;
     const entry = store[sessionKey.toLowerCase()] ?? store[sessionKey];
-    return {
-      lastChannel: entry?.lastChannel,
-      lastTo: entry?.lastTo,
-      lastAccountId: entry?.lastAccountId,
-    };
+    if (!isRecord(entry)) {
+      return undefined;
+    }
+    const deliveryContext = isRecord(entry.deliveryContext) ? entry.deliveryContext : {};
+    return compactDeliverySnapshot({
+      channel: readOptionalString(deliveryContext.channel) ?? readOptionalString(entry.lastChannel),
+      to: readOptionalString(deliveryContext.to) ?? readOptionalString(entry.lastTo),
+      accountId:
+        readOptionalString(deliveryContext.accountId) ?? readOptionalString(entry.lastAccountId),
+      threadId:
+        readOptionalThreadId(deliveryContext.threadId) ?? readOptionalThreadId(entry.lastThreadId),
+    });
   } catch {
-    return {};
+    return undefined;
   }
+}
+
+function resolveCompletionDeliverySnapshot(params: {
+  ctx: OpenClawPluginToolContext;
+  sessionKey?: string;
+  agentId?: string;
+}) {
+  return (
+    resolveContextDeliverySnapshot(params.ctx) ??
+    resolveSessionDeliverySnapshot({
+      ctx: params.ctx,
+      sessionKey: params.sessionKey,
+      agentId: params.agentId,
+    })
+  );
 }
 
 function resolveWatchSessionKey(params: {
@@ -377,18 +457,9 @@ const localToolDefs: LocalToolDef[] = [
         registeredAt: now,
         updatedAt: now,
       };
-      const delivery = resolveSessionDeliverySnapshot({ ctx, sessionKey, agentId });
-      if (
-        typeof delivery.lastChannel === "string" ||
-        typeof delivery.lastTo === "string" ||
-        typeof delivery.lastAccountId === "string"
-      ) {
-        watch.deliverySnapshot = {
-          channel: typeof delivery.lastChannel === "string" ? delivery.lastChannel : undefined,
-          to: typeof delivery.lastTo === "string" ? delivery.lastTo : undefined,
-          accountId:
-            typeof delivery.lastAccountId === "string" ? delivery.lastAccountId : undefined,
-        };
+      const deliverySnapshot = resolveCompletionDeliverySnapshot({ ctx, sessionKey, agentId });
+      if (deliverySnapshot) {
+        watch.deliverySnapshot = deliverySnapshot;
       }
       const stateDir = api.runtime.state.resolveStateDir(process.env);
       await upsertIndiceAsyncWatch({ stateDir, watch });
@@ -406,8 +477,10 @@ const localToolDefs: LocalToolDef[] = [
           runLabel: watch.runLabel,
           wakeMode: watch.wakeMode,
           refreshDate: watch.refreshDate,
+          deliverySnapshot: watch.deliverySnapshot ?? null,
         },
       });
+      schedulePatternIndiceWatchNow({ api, stateDir, watch });
       return formatLocalToolResult({
         ok: true,
         service: "Pattern board-index refresh",
@@ -420,7 +493,7 @@ const localToolDefs: LocalToolDef[] = [
           refresh_date: watch.refreshDate,
           heartbeat_enabled: isHeartbeatEnabledForAgent(api.config, watch.agentId),
           heartbeat_summary: resolveHeartbeatSummaryForAgent(api.config, watch.agentId),
-          delivery_snapshot: delivery,
+          delivery_snapshot: watch.deliverySnapshot ?? null,
         },
       });
     },
@@ -511,13 +584,24 @@ const localToolDefs: LocalToolDef[] = [
       ["job_id"],
     ),
     async execute(ctx, params, api) {
+      let watchParams = params;
+      if (
+        readString(params, "trigger_type") === "cron" &&
+        (readString(params, "idempotency_key") || readString(params, "request_key"))
+      ) {
+        const latestTradeDate = await resolveLatestAvailableTradeDate({
+          pluginConfig: api.pluginConfig as PatternStrategyPluginConfig | undefined,
+          logger: api.logger,
+        });
+        watchParams = normalizeCronStrategyWatchParams(params, latestTradeDate.tradeDate).params;
+      }
       const jobId = typeof params.job_id === "string" ? params.job_id.trim() : "";
       if (!jobId) {
         throw new Error("strategy_watch_run requires job_id");
       }
       const sessionKey = resolveWatchSessionKey({
         ctx,
-        explicitSessionKey: params.session_key,
+        explicitSessionKey: watchParams.session_key,
       });
       if (!sessionKey) {
         throw new Error(
@@ -525,68 +609,61 @@ const localToolDefs: LocalToolDef[] = [
         );
       }
       const agentId =
-        typeof params.agent_id === "string" && params.agent_id.trim()
-          ? params.agent_id.trim()
+        typeof watchParams.agent_id === "string" && watchParams.agent_id.trim()
+          ? watchParams.agent_id.trim()
           : ctx.agentId?.trim();
       if (!agentId) {
         throw new Error("strategy_watch_run requires agent_id when no current agent is available");
       }
       const wakeMode =
-        typeof params.wake_mode === "string" && params.wake_mode.trim() === "next-heartbeat"
+        typeof watchParams.wake_mode === "string" &&
+        watchParams.wake_mode.trim() === "next-heartbeat"
           ? ("next-heartbeat" as AsyncCompletionWakeMode)
           : ("now" as AsyncCompletionWakeMode);
       const now = Date.now();
       const taskKey =
-        typeof params.task_key === "string" && params.task_key.trim()
-          ? params.task_key.trim()
+        typeof watchParams.task_key === "string" && watchParams.task_key.trim()
+          ? watchParams.task_key.trim()
           : undefined;
       const forceEnrichment = shouldForceEnrichment(taskKey);
       const watch: PatternStrategyAsyncWatch = {
         kind: "pattern_strategy_run",
         jobId,
         taskKey,
-        idempotencyKey: readString(params, "idempotency_key") ?? readString(params, "request_key"),
-        source: readString(params, "source"),
-        requestedBy: readString(params, "requested_by"),
-        traceId: readString(params, "trace_id"),
-        triggerType: readString(params, "trigger_type"),
+        idempotencyKey:
+          readString(watchParams, "idempotency_key") ?? readString(watchParams, "request_key"),
+        source: readString(watchParams, "source"),
+        requestedBy: readString(watchParams, "requested_by"),
+        traceId: readString(watchParams, "trace_id"),
+        triggerType: readString(watchParams, "trigger_type"),
         marketDate: resolveSubmissionMarketDate({
           idempotencyKey:
-            readString(params, "idempotency_key") ?? readString(params, "request_key"),
-          overrides: params.resolved_window,
+            readString(watchParams, "idempotency_key") ?? readString(watchParams, "request_key"),
+          overrides: watchParams.resolved_window,
         }),
         requestKey:
-          typeof params.request_key === "string" && params.request_key.trim()
-            ? params.request_key.trim()
-            : typeof params.idempotency_key === "string" && params.idempotency_key.trim()
-              ? params.idempotency_key.trim()
+          typeof watchParams.request_key === "string" && watchParams.request_key.trim()
+            ? watchParams.request_key.trim()
+            : typeof watchParams.idempotency_key === "string" && watchParams.idempotency_key.trim()
+              ? watchParams.idempotency_key.trim()
               : undefined,
         runLabel:
-          typeof params.run_label === "string" && params.run_label.trim()
-            ? params.run_label.trim()
+          typeof watchParams.run_label === "string" && watchParams.run_label.trim()
+            ? watchParams.run_label.trim()
             : undefined,
         sessionKey,
         agentId,
         wakeMode,
         followupMode: "direct-agent-delivery",
-        enrichSignals: forceEnrichment ? true : params.enrich_signals !== false,
-        maxSignals: resolveWatchMaxSignals(params.max_signals),
-        resolvedWindow: params.resolved_window,
+        enrichSignals: forceEnrichment ? true : watchParams.enrich_signals !== false,
+        maxSignals: resolveWatchMaxSignals(watchParams.max_signals),
+        resolvedWindow: watchParams.resolved_window,
         registeredAt: now,
         updatedAt: now,
       };
-      const delivery = resolveSessionDeliverySnapshot({ ctx, sessionKey, agentId });
-      if (
-        typeof delivery.lastChannel === "string" ||
-        typeof delivery.lastTo === "string" ||
-        typeof delivery.lastAccountId === "string"
-      ) {
-        watch.deliverySnapshot = {
-          channel: typeof delivery.lastChannel === "string" ? delivery.lastChannel : undefined,
-          to: typeof delivery.lastTo === "string" ? delivery.lastTo : undefined,
-          accountId:
-            typeof delivery.lastAccountId === "string" ? delivery.lastAccountId : undefined,
-        };
+      const deliverySnapshot = resolveCompletionDeliverySnapshot({ ctx, sessionKey, agentId });
+      if (deliverySnapshot) {
+        watch.deliverySnapshot = deliverySnapshot;
       }
       const stateDir = api.runtime.state.resolveStateDir(process.env);
       await upsertAsyncWatch({ stateDir, watch });
@@ -611,7 +688,14 @@ const localToolDefs: LocalToolDef[] = [
           wakeMode: watch.wakeMode,
           enrichSignals: watch.enrichSignals,
           maxSignals: watch.maxSignals,
+          deliverySnapshot: watch.deliverySnapshot ?? null,
         },
+      });
+      schedulePatternStrategyWatchNow({
+        api,
+        stateDir,
+        ...(ctx.workspaceDir ? { workspaceDir: ctx.workspaceDir } : {}),
+        watch,
       });
       return formatLocalToolResult({
         ok: true,
@@ -631,7 +715,7 @@ const localToolDefs: LocalToolDef[] = [
           max_signals: watch.maxSignals,
           heartbeat_enabled: isHeartbeatEnabledForAgent(api.config, watch.agentId),
           heartbeat_summary: resolveHeartbeatSummaryForAgent(api.config, watch.agentId),
-          delivery_snapshot: delivery,
+          delivery_snapshot: watch.deliverySnapshot ?? null,
         },
       });
     },

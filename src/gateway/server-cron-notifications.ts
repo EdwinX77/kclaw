@@ -22,6 +22,7 @@ import { fetchWithSsrFGuard } from "../infra/net/fetch-guard.js";
 import { SsrFBlockedError } from "../infra/net/ssrf.js";
 
 const CRON_WEBHOOK_TIMEOUT_MS = 10_000;
+const CRON_STARTED_ANNOUNCE_TIMEOUT_MS = 30_000;
 
 type CronLogger = {
   warn: (obj: unknown, msg?: string) => void;
@@ -89,6 +90,15 @@ function buildCronWebhookHeaders(webhookToken?: string): Record<string, string> 
     headers.Authorization = `Bearer ${webhookToken}`;
   }
   return headers;
+}
+
+function buildCronStartedAnnouncementText(evt: CronEvent, job: CronJob) {
+  const lines = [
+    `Cron job "${job.name}" started.`,
+    `Job ID: ${job.id}`,
+    evt.runAtMs ? `Run at: ${new Date(evt.runAtMs).toISOString()}` : null,
+  ];
+  return lines.filter((line): line is string => Boolean(line)).join("\n");
 }
 
 /** Posts a cron webhook without throwing back into scheduler completion flow. */
@@ -209,6 +219,58 @@ export async function sendGatewayCronFailureAlert(params: {
     message: params.text,
     abortSignal: abortController.signal,
   });
+}
+
+/** Dispatches announce-mode notifications when a cron run starts. */
+export function dispatchGatewayCronStartedNotifications(params: {
+  evt: CronEvent;
+  job?: CronJob;
+  deps: CliDeps;
+  logger: CronLogger;
+  resolveCronAgent: CronAgentResolver;
+}): void {
+  if (params.evt.action !== "started" || !params.job) {
+    return;
+  }
+  const job = params.job;
+  const plan = resolveCronDeliveryPlan(job);
+  if (plan.mode !== "announce" || !plan.requested) {
+    return;
+  }
+  const { agentId, cfg: runtimeConfig } = params.resolveCronAgent(job.agentId);
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => {
+    abortController.abort();
+  }, CRON_STARTED_ANNOUNCE_TIMEOUT_MS);
+
+  // Start notifications are best-effort: a route issue should not fail the
+  // scheduled job before the agent turn has a chance to run.
+  void (async () => {
+    try {
+      await sendCronAnnouncePayloadStrict({
+        deps: params.deps,
+        cfg: runtimeConfig,
+        agentId,
+        jobId: job.id,
+        target: {
+          channel: plan.channel,
+          to: plan.to,
+          threadId: plan.threadId,
+          accountId: plan.accountId,
+          sessionKey: resolveCronDeliverySessionKey(job),
+        },
+        message: buildCronStartedAnnouncementText(params.evt, job),
+        abortSignal: abortController.signal,
+      });
+    } catch (err) {
+      params.logger.warn(
+        { jobId: job.id, err: formatErrorMessage(err) },
+        "cron: started announce delivery failed",
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
 }
 
 /** Dispatches completion and failure-destination notifications after a cron run finishes. */

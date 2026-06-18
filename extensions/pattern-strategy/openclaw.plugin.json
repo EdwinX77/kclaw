@@ -2,6 +2,9 @@
   "id": "pattern-strategy",
   "name": "Pattern Strategy",
   "description": "Bridge Pattern Strategy HTTP-exposed tools into OpenClaw agent tools.",
+  "activation": {
+    "onStartup": true
+  },
   "contracts": {
     "tools": [
       "automation_run_daily_summary",

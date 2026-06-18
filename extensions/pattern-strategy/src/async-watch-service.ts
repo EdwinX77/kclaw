@@ -11,6 +11,7 @@ import {
   type PatternStrategyAsyncWatch,
   updateAsyncWatch,
 } from "./async-watch-store.js";
+import { listAutomationRuns, recordAutomationRun } from "./automation-run-store.js";
 import { formatPatternStrategyResult, invokePatternStrategyTool } from "./client.js";
 import {
   listIndiceAsyncWatches,
@@ -66,6 +67,7 @@ type WatchServiceState = {
   timer: NodeJS.Timeout | null;
   running: boolean;
   stateDir?: string;
+  workspaceDir?: string;
 };
 
 const INDICE_TERMINAL_STATUSES = new Set(["completed", "partial_failed", "failed"]);
@@ -76,6 +78,9 @@ const OVERALL_ANALYSIS_MAX_CHARS = 480;
 const DEFAULT_OVERALL_ANALYSIS =
   "综合排序待模型返回；当前仅保留策略侧正式信号，交易前需补齐逐标的数据支撑后再排序。";
 const DEFAULT_SIGNAL_ENRICHMENT_FIELD = "模型未返回该标的该项数据支撑。";
+const VOLATILE_TERMINAL_STATUS_CONFIRMATION_MS = 5 * 60_000;
+const VOLATILE_TERMINAL_STATUSES = new Set(["cancelled", "canceled", "timeout"]);
+const DEFAULT_RECENT_SIGNAL_RECOVERY_DAYS = 5;
 const ENRICHMENT_SECTION_SPECS = [
   { key: "financialGrowth", label: "财务成长" },
   { key: "institutionHolderChange", label: "机构持仓" },
@@ -84,6 +89,8 @@ const ENRICHMENT_SECTION_SPECS = [
   { key: "informationGaps", label: "信息缺口" },
   { key: "tradingPrinciples", label: "交易原则检查" },
 ] as const;
+const activeStrategyWatchJobs = new Set<string>();
+const activeIndiceWatchJobs = new Set<string>();
 
 function resolvePollMs(config?: PatternStrategyPluginConfig) {
   const seconds = config?.asyncPollSeconds;
@@ -180,6 +187,9 @@ function translateClassificationReason(reason: string) {
     return "本次返回的是历史信号，不代表今日新增信号。";
   }
   if (reason === "latest_only returned only fallback-sized results without fresh-source metadata") {
+    return "本次返回的是历史信号，不代表今日新增信号。";
+  }
+  if (reason === "server delivery used fallback") {
     return "本次返回的是历史信号，不代表今日新增信号。";
   }
   if (reason === "no signals returned") {
@@ -283,7 +293,23 @@ function extractSignalRows(data: unknown): unknown[] {
     return data;
   }
   const record = asRecord(data);
-  for (const key of ["signals", "rows", "items", "results", "data"]) {
+  for (const key of [
+    "signals",
+    "signal_rows",
+    "signalRows",
+    "recent_signals",
+    "recentSignals",
+    "latest_signals",
+    "latestSignals",
+    "delivered_signals",
+    "deliveredSignals",
+    "delivery_items",
+    "deliveryItems",
+    "rows",
+    "items",
+    "results",
+    "data",
+  ]) {
     const value = record?.[key];
     if (Array.isArray(value)) {
       return value;
@@ -594,12 +620,160 @@ async function fetchTaskDeliveryPolicy(params: {
   );
 }
 
+function shouldDeferVolatileTerminalStatus(params: {
+  watch: PatternStrategyAsyncWatch;
+  status: string;
+  now: number;
+}) {
+  if (!VOLATILE_TERMINAL_STATUSES.has(params.status)) {
+    return false;
+  }
+  const registeredAt = Number.isFinite(params.watch.registeredAt)
+    ? Math.max(0, params.watch.registeredAt)
+    : 0;
+  return params.now - registeredAt < VOLATILE_TERMINAL_STATUS_CONFIRMATION_MS;
+}
+
+function resolveRecentSignalRecoveryDays(policy: SignalDeliveryPolicy) {
+  const policyDays = Math.floor(policy.recentDays ?? 0);
+  return policyDays > 0 ? policyDays : DEFAULT_RECENT_SIGNAL_RECOVERY_DAYS;
+}
+
+function resolveSignalRecoveryLimit(params: {
+  watch: PatternStrategyAsyncWatch;
+  policy: SignalDeliveryPolicy;
+}) {
+  const policyLimit = Math.floor(params.policy.maxItems ?? 0);
+  const maxSignals = Math.max(1, Math.floor(params.watch.maxSignals));
+  return policyLimit > 0 ? Math.min(maxSignals, policyLimit) : maxSignals;
+}
+
+function signalRecoveryIdentity(row: unknown, policy: SignalDeliveryPolicy) {
+  const record = asRecord(row);
+  const symbol = readFirstString(record, ["symbol", "ts_code", "code"]) ?? "unknown";
+  const signalDate = extractRowMarketDate(row, policy.dateField) ?? "unknown";
+  return `${symbol.toUpperCase()}:${signalDate}`;
+}
+
+function keepRecentSignalRows(params: {
+  rows: unknown[];
+  referenceDate: string;
+  recentDays: number;
+  policy: SignalDeliveryPolicy;
+}) {
+  return params.rows.filter((row) => {
+    const signalDate = extractRowMarketDate(row, params.policy.dateField);
+    return Boolean(
+      signalDate &&
+      !isOutsideRecentMarketWindow({
+        referenceDate: params.referenceDate,
+        signalDate,
+        recentDays: params.recentDays,
+      }),
+    );
+  });
+}
+
+async function recoverRecentAutomationSignals(params: {
+  api: OpenClawPluginApi;
+  stateDir: string;
+  watch: PatternStrategyAsyncWatch;
+  runData: Record<string, unknown> | null;
+  policy: SignalDeliveryPolicy;
+}): Promise<SignalFetchResult | undefined> {
+  if (!params.watch.taskKey || !isScheduledStrategyWatch(params.watch)) {
+    return undefined;
+  }
+  const recentDays = resolveRecentSignalRecoveryDays(params.policy);
+  const referenceDate = extractReferenceDate(params.runData, params.watch);
+  const records = await listAutomationRuns({
+    stateDir: params.stateDir,
+    filter: {
+      category: "strategy",
+      taskKey: params.watch.taskKey,
+      status: "succeeded",
+      limit: 20,
+    },
+  });
+  const rows: unknown[] = [];
+  const sourceJobIds: string[] = [];
+  const seen = new Set<string>();
+  const limit = resolveSignalRecoveryLimit({ watch: params.watch, policy: params.policy });
+
+  for (const record of records) {
+    const jobId = record.businessJobId;
+    if (
+      !jobId ||
+      jobId === "-" ||
+      jobId === params.watch.jobId ||
+      (record.returnedCount ?? 0) <= 0
+    ) {
+      continue;
+    }
+    let candidate: SignalFetchResult;
+    try {
+      candidate = await fetchSignals({
+        pluginConfig: params.api.pluginConfig as PatternStrategyPluginConfig | undefined,
+        jobId,
+        limit,
+        logger: params.api.logger,
+        logContext: buildWatchMcpLogContext(params.watch),
+      });
+    } catch (error) {
+      params.api.logger.warn(
+        `pattern-strategy recent signal recovery failed for ${jobId}: ${String(error)}`,
+      );
+      continue;
+    }
+    const recentRows = keepRecentSignalRows({
+      rows: candidate.rows,
+      referenceDate,
+      recentDays,
+      policy: params.policy,
+    });
+    for (const row of recentRows) {
+      const identity = signalRecoveryIdentity(row, params.policy);
+      if (seen.has(identity)) {
+        continue;
+      }
+      seen.add(identity);
+      rows.push(row);
+    }
+    if (recentRows.length > 0) {
+      sourceJobIds.push(jobId);
+    }
+    if (rows.length >= limit) {
+      break;
+    }
+  }
+
+  const recoveredRows = rows.slice(0, limit);
+  if (recoveredRows.length === 0) {
+    return undefined;
+  }
+  return {
+    rows: recoveredRows,
+    data: {
+      items: recoveredRows,
+      delivery: {
+        mode: "recent_window_with_fallback",
+        source: "automation_recent_window",
+        used_fallback: false,
+        window_end: referenceDate,
+      },
+      recovered_from_job_ids: sourceJobIds,
+    },
+    meta: { source: "automation_recent_window" },
+  };
+}
+
 export const __testing = {
   buildSignalFetchFailureNotification,
   buildStrategySignalSummaryPayload,
   extractModelSignalSummary,
   extractOverallAnalysisText,
   classifySignals,
+  extractSignalRows,
   fetchRunStatus,
   processPendingWatch,
 };
@@ -1177,6 +1351,7 @@ type DeliveryWatch = {
     channel?: string;
     to?: string;
     accountId?: string;
+    threadId?: string | number;
   };
 };
 
@@ -1196,6 +1371,7 @@ async function deliverDeterministicUpdate(params: {
       channel,
       to,
       accountId: params.watch.deliverySnapshot?.accountId,
+      threadId: params.watch.deliverySnapshot?.threadId,
       payloads: [{ text: params.text }],
       session: buildOutboundSessionContext({
         cfg: params.api.config,
@@ -1290,6 +1466,133 @@ function buildWatchMcpLogContext(watch: PatternStrategyAsyncWatch) {
   };
 }
 
+function isScheduledStrategyWatch(watch: PatternStrategyAsyncWatch) {
+  return Boolean(
+    watch.source === "openclaw_cron" ||
+    watch.triggerType === "cron" ||
+    watch.traceId?.startsWith("cron:") ||
+    watch.sessionKey.includes(":cron:"),
+  );
+}
+
+function resolveTaskFamily(taskKey?: string) {
+  switch (taskKey) {
+    case "strategy.mid_term_accel.daily_scan":
+      return "mid_term_accel";
+    case "strategy.mid_term_reversal_opt.daily_scan":
+      return "mid_term_reversal_opt";
+    case "strategy.strong_pivot_breakout.daily_scan":
+      return "strong_pivot_breakout";
+    default: {
+      const normalized =
+        taskKey
+          ?.replace(/^strategy\./, "")
+          .replace(/\.daily_scan$/, "")
+          .replace(/[^a-z0-9]+/gi, "_")
+          .replace(/^_+|_+$/g, "")
+          .toLowerCase() ?? "";
+      return normalized || "strategy";
+    }
+  }
+}
+
+function inferCronJobId(watch: PatternStrategyAsyncWatch) {
+  const fromTrace = watch.traceId ? /^cron:([^:]+)/.exec(watch.traceId) : null;
+  if (fromTrace?.[1]) {
+    return fromTrace[1];
+  }
+  return /(?:^|:)cron:([^:]+)/.exec(watch.sessionKey)?.[1];
+}
+
+function readCountFromRecord(record: Record<string, unknown> | null, keys: string[]) {
+  for (const key of keys) {
+    const value = record?.[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return Math.max(0, Math.trunc(value));
+    }
+    if (typeof value === "string" && value.trim()) {
+      const parsed = Number.parseInt(value, 10);
+      if (Number.isFinite(parsed)) {
+        return Math.max(0, parsed);
+      }
+    }
+  }
+  return undefined;
+}
+
+function resolveRawSignalCount(signalResult: SignalFetchResult) {
+  const record = asRecord(signalResult.data);
+  return (
+    readCountFromRecord(record, [
+      "raw_count",
+      "rawCount",
+      "original_count",
+      "originalCount",
+      "total_count",
+      "totalCount",
+      "count",
+    ]) ?? signalResult.rows.length
+  );
+}
+
+function extractSignalSymbols(rows: unknown[]) {
+  return Array.from(
+    new Set(
+      rows
+        .map((row) => {
+          const record = asRecord(row);
+          return readFirstString(record, ["symbol", "ts_code", "code"]);
+        })
+        .filter((entry): entry is string => Boolean(entry)),
+    ),
+  );
+}
+
+async function recordScheduledStrategyRun(params: {
+  api: OpenClawPluginApi;
+  stateDir: string;
+  workspaceDir?: string;
+  watch: PatternStrategyAsyncWatch;
+  remoteStatus: string;
+  signalResult: SignalFetchResult;
+  classification: SignalDeliveryClassification | { kind: "terminal_error"; reason: string };
+}) {
+  if (params.watch.automationRecordedAt || !isScheduledStrategyWatch(params.watch)) {
+    return params.watch.automationRecordedAt;
+  }
+  const actionable = params.classification.kind === "actionable";
+  try {
+    await recordAutomationRun({
+      stateDir: params.stateDir,
+      workspaceDir: params.workspaceDir,
+      record: {
+        source: params.watch.source ?? "openclaw_cron",
+        category: "strategy",
+        taskFamily: resolveTaskFamily(params.watch.taskKey),
+        taskKey: params.watch.taskKey ?? "strategy",
+        cronJobId: inferCronJobId(params.watch),
+        businessJobId: params.watch.jobId,
+        status: params.remoteStatus,
+        rawCount: resolveRawSignalCount(params.signalResult),
+        returnedCount: actionable ? params.signalResult.rows.length : 0,
+        symbols: actionable ? extractSignalSymbols(params.signalResult.rows) : [],
+        overrides: params.watch.resolvedWindow ?? null,
+        notes: actionable
+          ? "async watcher 已记录可交付策略信号并进入投放链路"
+          : `async watcher 已完成但无新增可交付信号：${translateClassificationReason(
+              params.classification.reason,
+            )}`,
+      },
+    });
+    return Date.now();
+  } catch (error) {
+    params.api.logger.warn(
+      `pattern-strategy automation run record failed for ${params.watch.jobId}: ${String(error)}`,
+    );
+    return undefined;
+  }
+}
+
 async function runActionableSignalCallback(params: {
   api: OpenClawPluginApi;
   watch: PatternStrategyAsyncWatch;
@@ -1334,6 +1637,7 @@ async function runActionableSignalCallback(params: {
       OriginatingChannel: channel,
       OriginatingTo: to,
       AccountId: params.watch.deliverySnapshot?.accountId,
+      MessageThreadId: params.watch.deliverySnapshot?.threadId,
       Provider: "async-event",
     },
     {
@@ -1377,6 +1681,7 @@ async function runActionableSignalCallback(params: {
       channel,
       to,
       accountId: params.watch.deliverySnapshot?.accountId,
+      threadId: params.watch.deliverySnapshot?.threadId,
       payloads,
       session,
       identity,
@@ -1542,6 +1847,7 @@ async function handleSignalFetchFailure(params: {
 async function processPendingWatch(params: {
   api: OpenClawPluginApi;
   stateDir: string;
+  workspaceDir?: string;
   watch: PatternStrategyAsyncWatch;
 }) {
   const runData = await fetchRunStatus({
@@ -1551,6 +1857,34 @@ async function processPendingWatch(params: {
     logContext: buildWatchMcpLogContext(params.watch),
   });
   const remoteStatus = normalizeStatus(runData?.status);
+  const now = Date.now();
+  if (
+    STRATEGY_TERMINAL_STATUSES.has(remoteStatus) &&
+    shouldDeferVolatileTerminalStatus({ watch: params.watch, status: remoteStatus, now })
+  ) {
+    const pendingStatus = `${remoteStatus}_pending_confirmation`;
+    await appendAgentInteractionAuditRecord({
+      kind: "async_watch_progress",
+      requesterSessionKey: params.watch.sessionKey,
+      sessionKey: params.watch.sessionKey,
+      agentId: params.watch.agentId,
+      jobId: params.watch.jobId,
+      status: pendingStatus,
+      summary: "pattern-strategy async watch deferred a volatile terminal status",
+      data: {
+        taskKey: params.watch.taskKey,
+        requestKey: params.watch.requestKey,
+        observedRemoteStatus: remoteStatus,
+      },
+    });
+    await updateAsyncWatch(params.stateDir, params.watch.jobId, (existing) => ({
+      ...existing,
+      lastRemoteStatus: pendingStatus,
+      lastError: undefined,
+      updatedAt: now,
+    }));
+    return;
+  }
   if (!STRATEGY_TERMINAL_STATUSES.has(remoteStatus)) {
     await appendAgentInteractionAuditRecord({
       kind: "async_watch_progress",
@@ -1569,7 +1903,7 @@ async function processPendingWatch(params: {
       ...existing,
       lastRemoteStatus: remoteStatus,
       lastError: undefined,
-      updatedAt: Date.now(),
+      updatedAt: now,
     }));
     return;
   }
@@ -1614,6 +1948,18 @@ async function processPendingWatch(params: {
           return {};
         })
       : {};
+  if (remoteStatus === "succeeded" && signalResult.rows.length === 0) {
+    const recoveredSignalResult = await recoverRecentAutomationSignals({
+      api: params.api,
+      stateDir: params.stateDir,
+      watch: params.watch,
+      runData,
+      policy,
+    });
+    if (recoveredSignalResult) {
+      signalResult = recoveredSignalResult;
+    }
+  }
   const classification =
     remoteStatus === "succeeded"
       ? classifySignals({
@@ -1629,6 +1975,15 @@ async function processPendingWatch(params: {
           reason: `terminal status ${remoteStatus}`,
         } as const);
   if (classification.kind !== "actionable") {
+    const automationRecordedAt = await recordScheduledStrategyRun({
+      api: params.api,
+      stateDir: params.stateDir,
+      workspaceDir: params.workspaceDir,
+      watch: params.watch,
+      remoteStatus,
+      signalResult,
+      classification,
+    });
     const deliveryStatus = await deliverDeterministicUpdate({
       api: params.api,
       watch: params.watch,
@@ -1671,11 +2026,21 @@ async function processPendingWatch(params: {
       dsInvoked: false,
       deliveryStatus,
       lastError: undefined,
+      automationRecordedAt: existing.automationRecordedAt ?? automationRecordedAt,
       updatedAt: Date.now(),
       completedAt: Date.now(),
     }));
     return;
   }
+  const automationRecordedAt = await recordScheduledStrategyRun({
+    api: params.api,
+    stateDir: params.stateDir,
+    workspaceDir: params.workspaceDir,
+    watch: params.watch,
+    remoteStatus,
+    signalResult,
+    classification,
+  });
   const eventText = buildAsyncCompletionEvent({
     watch: params.watch,
     runData,
@@ -1718,6 +2083,7 @@ async function processPendingWatch(params: {
     callbackDeliveryStatus: callbackResult.deliveryStatus,
     callbackSessionKey: callbackResult.callbackSessionKey,
     lastError: undefined,
+    automationRecordedAt: existing.automationRecordedAt ?? automationRecordedAt,
     updatedAt: Date.now(),
     completedAt: Date.now(),
   }));
@@ -1808,6 +2174,74 @@ async function processIndiceWatch(params: {
   }));
 }
 
+async function processPendingWatchGuarded(params: {
+  api: OpenClawPluginApi;
+  stateDir: string;
+  workspaceDir?: string;
+  watch: PatternStrategyAsyncWatch;
+}) {
+  if (activeStrategyWatchJobs.has(params.watch.jobId)) {
+    return;
+  }
+  activeStrategyWatchJobs.add(params.watch.jobId);
+  try {
+    await processPendingWatch(params);
+  } finally {
+    activeStrategyWatchJobs.delete(params.watch.jobId);
+  }
+}
+
+async function processIndiceWatchGuarded(params: {
+  api: OpenClawPluginApi;
+  stateDir: string;
+  watch: IndiceRefreshAsyncWatch;
+}) {
+  if (activeIndiceWatchJobs.has(params.watch.jobId)) {
+    return;
+  }
+  activeIndiceWatchJobs.add(params.watch.jobId);
+  try {
+    await processIndiceWatch(params);
+  } finally {
+    activeIndiceWatchJobs.delete(params.watch.jobId);
+  }
+}
+
+export function schedulePatternStrategyWatchNow(params: {
+  api: OpenClawPluginApi;
+  stateDir: string;
+  workspaceDir?: string;
+  watch: PatternStrategyAsyncWatch;
+}) {
+  const timer = setTimeout(() => {
+    void processPendingWatchGuarded(params).catch((error) => {
+      params.api.logger.warn(
+        `pattern-strategy async watch immediate poll failed for ${params.watch.jobId}: ${String(
+          error,
+        )}`,
+      );
+    });
+  }, 0);
+  timer.unref?.();
+}
+
+export function schedulePatternIndiceWatchNow(params: {
+  api: OpenClawPluginApi;
+  stateDir: string;
+  watch: IndiceRefreshAsyncWatch;
+}) {
+  const timer = setTimeout(() => {
+    void processIndiceWatchGuarded(params).catch((error) => {
+      params.api.logger.warn(
+        `pattern-strategy indice async watch immediate poll failed for ${
+          params.watch.jobId
+        }: ${String(error)}`,
+      );
+    });
+  }, 0);
+  timer.unref?.();
+}
+
 export function createPatternStrategyAsyncWatchService(
   api: OpenClawPluginApi,
 ): OpenClawPluginService {
@@ -1817,11 +2251,12 @@ export function createPatternStrategyAsyncWatchService(
     running: false,
   };
 
-  const schedule = () => {
+  const schedule = (
+    delayMs = resolvePollMs(api.pluginConfig as PatternStrategyPluginConfig | undefined),
+  ) => {
     if (state.stopRequested || !state.stateDir) {
       return;
     }
-    const delayMs = resolvePollMs(api.pluginConfig as PatternStrategyPluginConfig | undefined);
     state.timer = setTimeout(async () => {
       state.timer = null;
       if (state.stopRequested || state.running || !state.stateDir) {
@@ -1836,7 +2271,12 @@ export function createPatternStrategyAsyncWatchService(
             continue;
           }
           try {
-            await processPendingWatch({ api, stateDir: state.stateDir, watch });
+            await processPendingWatchGuarded({
+              api,
+              stateDir: state.stateDir,
+              ...(state.workspaceDir ? { workspaceDir: state.workspaceDir } : {}),
+              watch,
+            });
           } catch (error) {
             api.logger.warn(
               `pattern-strategy async watch failed for ${watch.jobId}: ${String(error)}`,
@@ -1867,7 +2307,7 @@ export function createPatternStrategyAsyncWatchService(
             continue;
           }
           try {
-            await processIndiceWatch({ api, stateDir: state.stateDir, watch });
+            await processIndiceWatchGuarded({ api, stateDir: state.stateDir, watch });
           } catch (error) {
             api.logger.warn(
               `pattern-strategy indice async watch failed for ${watch.jobId}: ${String(error)}`,
@@ -1906,7 +2346,8 @@ export function createPatternStrategyAsyncWatchService(
     async start(ctx) {
       state.stopRequested = false;
       state.stateDir = ctx.stateDir;
-      schedule();
+      state.workspaceDir = ctx.workspaceDir;
+      schedule(0);
       api.logger.info("pattern-strategy async watch service started");
     },
     async stop() {

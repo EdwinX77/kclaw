@@ -1,14 +1,21 @@
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "../../../src/plugins/types.js";
-import { listAsyncWatches } from "./async-watch-store.js";
+import { listAsyncWatches, updateAsyncWatch } from "./async-watch-store.js";
 import {
   formatPatternStrategyResult,
   invokePatternStrategyTool,
   type PatternStrategyPluginConfig,
 } from "./client.js";
 import { createPatternStrategyLocalTools } from "./local-tools.js";
+import {
+  resolveLatestAvailableTradeDate,
+  type LatestAvailableTradeDate,
+} from "./market-calendar.js";
 import { isFrontDoorAgentDirectExecution } from "./model-boundary-harness.js";
 import {
   findActiveStrategyWatch,
+  isStrategyTerminalStatus,
+  normalizeStrategyStatus,
+  normalizeCronStrategyTaskRunParams,
   validateStrategyTaskRunSubmission,
   type StrategyTaskRunSubmission,
 } from "./strategy-submission.js";
@@ -33,6 +40,7 @@ const numberSchema = () => ({ type: "number" });
 const booleanSchema = () => ({ type: "boolean" });
 const unknownSchema = () => ({});
 const stringArraySchema = () => ({ type: "array", items: { type: "string" } });
+const stringEnumSchema = (values: string[]) => ({ type: "string", enum: values });
 
 function resolveStateDir(api: OpenClawPluginApi) {
   try {
@@ -50,6 +58,36 @@ function buildMcpLogContext(submission: StrategyTaskRunSubmission) {
     requestedBy: submission.requestedBy,
     traceId: submission.traceId,
     triggerType: submission.triggerType,
+  };
+}
+
+type RemotePayload = Awaited<ReturnType<typeof invokePatternStrategyTool>>;
+
+function dataRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function withSubmissionData(params: {
+  payload: RemotePayload;
+  submission: StrategyTaskRunSubmission;
+  latestTradeDate?: LatestAvailableTradeDate;
+}) {
+  const data = dataRecord(params.payload.data);
+  return {
+    ...params.payload,
+    data: {
+      ...data,
+      task_key: params.submission.taskKey,
+      idempotency_key: params.submission.idempotencyKey,
+      source: params.submission.source,
+      requested_by: params.submission.requestedBy,
+      trace_id: params.submission.traceId,
+      trigger_type: params.submission.triggerType,
+      market_date: params.submission.marketDate,
+      latest_trade_date_source: params.latestTradeDate?.source,
+    },
   };
 }
 
@@ -101,10 +139,21 @@ function createRemoteTool(api: OpenClawPluginApi, ctx: OpenClawPluginToolContext
           "strategy_task_run is blocked for the Feishu group front-door agent. Resolve status through automation_run_latest/get_run, or delegate confirmed execution to the internal pattern-strategy agent.",
         );
       }
-      const submission =
+      let submission =
         def.remoteToolName === "strategy.task_run"
           ? validateStrategyTaskRunSubmission(params)
           : undefined;
+      let latestTradeDate: LatestAvailableTradeDate | undefined;
+      let remoteParams = params;
+      if (submission?.triggerType === "cron") {
+        latestTradeDate = await resolveLatestAvailableTradeDate({
+          pluginConfig: api.pluginConfig as PatternStrategyPluginConfig | undefined,
+          logger: api.logger,
+        });
+        const normalized = normalizeCronStrategyTaskRunParams(params, latestTradeDate.tradeDate);
+        submission = normalized.submission;
+        remoteParams = normalized.params;
+      }
       if (submission) {
         const activeWatch = await findGatewayActiveWatch({ api, submission });
         if (activeWatch) {
@@ -119,30 +168,44 @@ function createRemoteTool(api: OpenClawPluginApi, ctx: OpenClawPluginToolContext
             activePayload.data && typeof activePayload.data === "object"
               ? (activePayload.data as Record<string, unknown>)
               : {};
-          return await formatPatternStrategyResult({
-            remoteToolName: def.remoteToolName,
-            payload: {
-              ...activePayload,
-              tool_name: def.remoteToolName,
-              data: {
-                ...activeData,
-                job_id: activeWatch.jobId,
-                task_key: submission.taskKey,
-                idempotency_key: submission.idempotencyKey,
-                source: submission.source,
-                requested_by: submission.requestedBy,
-                trace_id: submission.traceId,
-                trigger_type: submission.triggerType,
-                gateway_deduped: true,
-                gateway_deduped_by_job_id: activeWatch.jobId,
+          const activeStatus = normalizeStrategyStatus(activeData.status);
+          if (isStrategyTerminalStatus(activeStatus)) {
+            const stateDir = resolveStateDir(api);
+            if (stateDir) {
+              const now = Date.now();
+              await updateAsyncWatch(stateDir, activeWatch.jobId, (existing) => ({
+                ...existing,
+                lastRemoteStatus: activeStatus,
+                updatedAt: now,
+                completedAt: existing.completedAt ?? now,
+              }));
+            }
+          } else {
+            return await formatPatternStrategyResult({
+              remoteToolName: def.remoteToolName,
+              payload: {
+                ...activePayload,
+                tool_name: def.remoteToolName,
+                data: {
+                  ...activeData,
+                  job_id: activeWatch.jobId,
+                  task_key: submission.taskKey,
+                  idempotency_key: submission.idempotencyKey,
+                  source: submission.source,
+                  requested_by: submission.requestedBy,
+                  trace_id: submission.traceId,
+                  trigger_type: submission.triggerType,
+                  gateway_deduped: true,
+                  gateway_deduped_by_job_id: activeWatch.jobId,
+                },
               },
-            },
-            pluginConfig: api.pluginConfig as PatternStrategyPluginConfig | undefined,
-          });
+              pluginConfig: api.pluginConfig as PatternStrategyPluginConfig | undefined,
+            });
+          }
         }
       }
       const args =
-        def.remoteToolName === "strategy.cancel_run" ? enforceManualCancel(params) : params;
+        def.remoteToolName === "strategy.cancel_run" ? enforceManualCancel(params) : remoteParams;
       const pluginConfig = api.pluginConfig as PatternStrategyPluginConfig | undefined;
       const payload = await invokePatternStrategyTool({
         pluginConfig,
@@ -151,9 +214,13 @@ function createRemoteTool(api: OpenClawPluginApi, ctx: OpenClawPluginToolContext
         logger: api.logger,
         logContext: submission ? buildMcpLogContext(submission) : undefined,
       });
+      const resultPayload =
+        submission && def.remoteToolName === "strategy.task_run"
+          ? withSubmissionData({ payload, submission, latestTradeDate })
+          : payload;
       return await formatPatternStrategyResult({
         remoteToolName: def.remoteToolName,
-        payload,
+        payload: resultPayload,
         pluginConfig,
       });
     },
@@ -180,7 +247,8 @@ const toolDefs: ToolDef[] = [
   {
     name: "strategy_task_run",
     label: "Strategy Task Run",
-    description: "Submit a Pattern Strategy task run. Bridges remote tool `strategy.task_run`.",
+    description:
+      "Submit a Pattern Strategy task run. Cron submissions are normalized through `market.latest_available_trade_date` before remote submission. Bridges remote tool `strategy.task_run`.",
     remoteToolName: "strategy.task_run",
     parameters: objectSchema(
       {
@@ -232,6 +300,36 @@ const toolDefs: ToolDef[] = [
       },
       ["job_id"],
     ),
+  },
+  {
+    name: "market_latest_available_trade_date",
+    label: "Market Latest Available Trade Date",
+    description:
+      "Resolve the latest Pattern market trade date available for daily scans. Bridges remote tool `market.latest_available_trade_date`.",
+    remoteToolName: "market.latest_available_trade_date",
+    parameters: objectSchema(
+      {
+        market: stringEnumSchema(["CN_A"]),
+        as_of: stringSchema(),
+        purpose: stringEnumSchema(["daily_scan"]),
+      },
+      ["market", "as_of", "purpose"],
+    ),
+  },
+  {
+    name: "market_trade_calendar",
+    label: "Market Trade Calendar",
+    description:
+      "Query Pattern market trade-calendar rows. Bridges remote tool `market.trade_calendar`.",
+    remoteToolName: "market.trade_calendar",
+    parameters: objectSchema({
+      start_date: stringSchema(),
+      end_date: stringSchema(),
+      reference_date: stringSchema(),
+      include_closed: booleanSchema(),
+      limit: numberSchema(),
+      order: stringEnumSchema(["asc", "desc"]),
+    }),
   },
   {
     name: "market_list_price_cache",

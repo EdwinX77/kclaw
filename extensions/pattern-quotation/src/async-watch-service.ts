@@ -24,6 +24,7 @@ type WatchServiceState = {
 const QUOTATION_TERMINAL_STATUSES = new Set(["completed", "partial_failed", "failed"]);
 const DEFAULT_POLL_MS = 15_000;
 const MIN_POLL_MS = 5_000;
+const activeQuotationWatchJobs = new Set<string>();
 
 function resolvePollMs(config?: PatternQuotationPluginConfig) {
   const seconds = config?.asyncPollSeconds;
@@ -155,6 +156,7 @@ async function deliverFeishuText(params: {
   api: OpenClawPluginApi;
   to: string;
   accountId?: string;
+  threadId?: string | number;
   text: string;
 }) {
   const account = resolveFeishuAccountConfig(params.api, params.accountId);
@@ -213,6 +215,7 @@ async function deliverViaSdkIfAvailable(params: {
   channel: string;
   to: string;
   accountId?: string;
+  threadId?: string | number;
   text: string;
 }) {
   const sdk = (await import("openclaw/plugin-sdk")) as Record<string, unknown>;
@@ -227,6 +230,7 @@ async function deliverViaSdkIfAvailable(params: {
     channel: params.channel,
     to: params.to,
     accountId: params.accountId,
+    threadId: params.threadId,
     payloads: [{ text: params.text }],
     session:
       typeof buildSession === "function"
@@ -308,7 +312,13 @@ async function deliverDeterministicUpdate(params: {
       channel === "feishu"
         ? resolveFeishuAccountId(params.api, params.watch.deliverySnapshot?.accountId)
         : params.watch.deliverySnapshot?.accountId;
-    const sdkStatus = await deliverViaSdkIfAvailable({ ...params, channel, to, accountId });
+    const sdkStatus = await deliverViaSdkIfAvailable({
+      ...params,
+      channel,
+      to,
+      accountId,
+      threadId: params.watch.deliverySnapshot?.threadId,
+    });
     if (sdkStatus) {
       return sdkStatus;
     }
@@ -317,6 +327,7 @@ async function deliverDeterministicUpdate(params: {
         api: params.api,
         to,
         accountId,
+        threadId: params.watch.deliverySnapshot?.threadId,
         text: params.text,
       });
       return "delivered" as const;
@@ -363,6 +374,11 @@ async function fetchQuotationErrors(params: {
   const data = result.details?.data;
   return Array.isArray(data) ? data : [];
 }
+
+export const __testing = {
+  buildQuotationTerminalNotification,
+  processQuotationWatch,
+};
 
 async function processQuotationWatch(params: {
   api: OpenClawPluginApi;
@@ -447,6 +463,39 @@ async function processQuotationWatch(params: {
   }));
 }
 
+async function processQuotationWatchGuarded(params: {
+  api: OpenClawPluginApi;
+  stateDir: string;
+  watch: QuotationRefreshAsyncWatch;
+}) {
+  if (activeQuotationWatchJobs.has(params.watch.jobId)) {
+    return;
+  }
+  activeQuotationWatchJobs.add(params.watch.jobId);
+  try {
+    await processQuotationWatch(params);
+  } finally {
+    activeQuotationWatchJobs.delete(params.watch.jobId);
+  }
+}
+
+export function schedulePatternQuotationWatchNow(params: {
+  api: OpenClawPluginApi;
+  stateDir: string;
+  watch: QuotationRefreshAsyncWatch;
+}) {
+  const timer = setTimeout(() => {
+    void processQuotationWatchGuarded(params).catch((error) => {
+      params.api.logger.warn(
+        `pattern-quotation async watch immediate poll failed for ${params.watch.jobId}: ${String(
+          error,
+        )}`,
+      );
+    });
+  }, 0);
+  timer.unref?.();
+}
+
 export function createPatternQuotationAsyncWatchService(
   api: OpenClawPluginApi,
 ): OpenClawPluginService {
@@ -456,11 +505,12 @@ export function createPatternQuotationAsyncWatchService(
     running: false,
   };
 
-  const schedule = () => {
+  const schedule = (
+    delayMs = resolvePollMs(api.pluginConfig as PatternQuotationPluginConfig | undefined),
+  ) => {
     if (state.stopRequested || !state.stateDir) {
       return;
     }
-    const delayMs = resolvePollMs(api.pluginConfig as PatternQuotationPluginConfig | undefined);
     state.timer = setTimeout(async () => {
       state.timer = null;
       if (state.stopRequested || state.running || !state.stateDir) {
@@ -475,7 +525,7 @@ export function createPatternQuotationAsyncWatchService(
             continue;
           }
           try {
-            await processQuotationWatch({ api, stateDir: state.stateDir, watch });
+            await processQuotationWatchGuarded({ api, stateDir: state.stateDir, watch });
           } catch (error) {
             api.logger.warn(
               `pattern-quotation async watch failed for ${watch.jobId}: ${String(error)}`,
@@ -512,7 +562,7 @@ export function createPatternQuotationAsyncWatchService(
     async start(ctx) {
       state.stopRequested = false;
       state.stateDir = ctx.stateDir;
-      schedule();
+      schedule(0);
       api.logger.info("pattern-quotation async watch service started");
     },
     async stop() {

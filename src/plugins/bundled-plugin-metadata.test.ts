@@ -47,6 +47,8 @@ const EXPECTED_BUNDLED_STARTUP_PLUGIN_IDS = [
   "lobster",
   "memory-wiki",
   "openshell",
+  "pattern-quotation",
+  "pattern-strategy",
   "phone-control",
   "policy",
   "talk-voice",

@@ -27,6 +27,7 @@ export type PatternStrategyAsyncWatch = {
     channel?: string;
     to?: string;
     accountId?: string;
+    threadId?: string | number;
   };
   lastRemoteStatus?: string;
   signalDeliveryKind?: "actionable" | "fallback_only" | "none" | "terminal_error";
@@ -35,6 +36,7 @@ export type PatternStrategyAsyncWatch = {
   callbackDeliveryStatus?: "delivered" | "not-delivered" | "not-requested";
   callbackSessionKey?: string;
   signalFetchFailureNotifiedAt?: number;
+  automationRecordedAt?: number;
   registeredAt: number;
   updatedAt: number;
   completedAt?: number;

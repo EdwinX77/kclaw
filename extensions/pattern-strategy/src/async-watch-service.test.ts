@@ -1,10 +1,46 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { OpenClawPluginApi } from "../../../src/plugins/types.js";
 import {
   __testing,
   buildAsyncCompletionEvent,
   buildTerminalNotification,
 } from "./async-watch-service.js";
-import type { PatternStrategyAsyncWatch } from "./async-watch-store.js";
+import {
+  listAsyncWatches,
+  upsertAsyncWatch,
+  type PatternStrategyAsyncWatch,
+} from "./async-watch-store.js";
+import { listAutomationRuns, recordAutomationRun } from "./automation-run-store.js";
+
+const tempDirs: string[] = [];
+const originalStateDir = process.env.OPENCLAW_STATE_DIR;
+
+async function makeTempDir() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-pattern-strategy-watch-"));
+  tempDirs.push(dir);
+  return dir;
+}
+
+function createApi(stateDir: string): OpenClawPluginApi {
+  return {
+    config: {},
+    pluginConfig: { baseUrl: "http://127.0.0.1:18080" },
+    logger: {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    },
+    runtime: {
+      state: {
+        resolveStateDir: () => stateDir,
+      },
+    },
+  } as unknown as OpenClawPluginApi;
+}
 
 function createWatch(taskKey: string): PatternStrategyAsyncWatch {
   return {
@@ -22,8 +58,16 @@ function createWatch(taskKey: string): PatternStrategyAsyncWatch {
   };
 }
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllGlobals();
+  if (originalStateDir === undefined) {
+    delete process.env.OPENCLAW_STATE_DIR;
+  } else {
+    process.env.OPENCLAW_STATE_DIR = originalStateDir;
+  }
+  await Promise.all(
+    tempDirs.splice(0).map(async (dir) => await fs.rm(dir, { recursive: true, force: true })),
+  );
 });
 
 describe("Pattern Strategy async watch notifications", () => {
@@ -191,6 +235,258 @@ describe("Pattern Strategy async watch notifications", () => {
     expect(text).toContain("watcher 会继续在后台重试");
     expect(text).toContain("后端恢复后会自动拉取正式信号并触发 CANSLIM enrichment 推送");
     expect(text).toContain("尚未调用 DS");
+  });
+
+  it("records scheduled terminal strategy watches even when signals are historical", async () => {
+    const stateDir = await makeTempDir();
+    const workspaceDir = await makeTempDir();
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    const fetchMock = vi.fn(async (url: Parameters<typeof fetch>[0]) => {
+      const toolName = String(url).split("/tools/")[1]?.split("/invoke")[0];
+      if (toolName === "strategy.get_run") {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            tool_name: "strategy.get_run",
+            data: {
+              job_id: "claw_test",
+              status: "succeeded",
+              resolved_window: { end_date: "2026-06-15" },
+            },
+            meta: {},
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (toolName === "strategy.get_signals") {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            tool_name: "strategy.get_signals",
+            data: {
+              raw_count: 10,
+              items: [{ symbol: "300481.SZ", end_date: "2026-06-06" }],
+              delivery: { used_fallback: true },
+            },
+            meta: {},
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          tool_name: "strategy.task_describe",
+          data: {
+            signal_delivery: {
+              recent_days: 5,
+              fallback_mode: "latest_one",
+              fallback_count: 1,
+            },
+          },
+          meta: {},
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await __testing.processPendingWatch({
+      api: createApi(stateDir),
+      stateDir,
+      workspaceDir,
+      watch: {
+        ...createWatch("strategy.strong_pivot_breakout.daily_scan"),
+        source: "openclaw_cron",
+        traceId: "cron:daily-strong-pivot:2026-06-15",
+        triggerType: "cron",
+        resolvedWindow: { end_date: "2026-06-15" },
+      },
+    });
+
+    const records = await listAutomationRuns({ stateDir });
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      source: "openclaw_cron",
+      category: "strategy",
+      taskFamily: "strong_pivot_breakout",
+      taskKey: "strategy.strong_pivot_breakout.daily_scan",
+      cronJobId: "daily-strong-pivot",
+      businessJobId: "claw_test",
+      status: "succeeded",
+      rawCount: 10,
+      returnedCount: 0,
+      symbols: [],
+    });
+    expect(records[0]?.notes).toContain("历史信号");
+  });
+
+  it("defers volatile cancelled statuses for newly registered scheduled watches", async () => {
+    const stateDir = await makeTempDir();
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    const now = Date.now();
+    const watch = {
+      ...createWatch("strategy.strong_pivot_breakout.daily_scan"),
+      jobId: "claw_cancel_race",
+      source: "openclaw_cron",
+      triggerType: "cron",
+      traceId: "cron:daily-strong-pivot:2026-06-17",
+      requestKey: "strategy.strong_pivot_breakout.daily_scan:cron-strong-pivot-breakout-2026-06-17",
+      registeredAt: now - 60_000,
+      updatedAt: now - 60_000,
+    };
+    await upsertAsyncWatch({ stateDir, watch });
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          tool_name: "strategy.get_run",
+          data: {
+            job_id: "claw_cancel_race",
+            status: "cancelled",
+          },
+          meta: {},
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await __testing.processPendingWatch({
+      api: createApi(stateDir),
+      stateDir,
+      watch,
+    });
+
+    const [updated] = await listAsyncWatches(stateDir);
+    expect(updated).toMatchObject({
+      jobId: "claw_cancel_race",
+      lastRemoteStatus: "cancelled_pending_confirmation",
+    });
+    expect(updated?.completedAt).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers recent-window reversal signals from a previous successful automation run", async () => {
+    const stateDir = await makeTempDir();
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    await recordAutomationRun({
+      stateDir,
+      record: {
+        source: "openclaw_cron",
+        category: "strategy",
+        taskFamily: "mid_term_reversal_opt",
+        taskKey: "strategy.mid_term_reversal_opt.daily_scan",
+        cronJobId: "daily-reversal",
+        businessJobId: "claw_previous_reversal",
+        status: "succeeded",
+        rawCount: 2,
+        returnedCount: 2,
+        symbols: ["301288.SZ", "002345.SZ"],
+      },
+    });
+    const watch = {
+      ...createWatch("strategy.mid_term_reversal_opt.daily_scan"),
+      jobId: "claw_current_reversal",
+      source: "openclaw_cron",
+      triggerType: "cron",
+      traceId: "cron:daily-reversal:2026-06-18",
+      requestKey: "strategy.mid_term_reversal_opt.daily_scan:cron-mid-term-reversal-opt-2026-06-18",
+      idempotencyKey: "cron-mid-term-reversal-opt-2026-06-18",
+      resolvedWindow: { end_date: "2026-06-18" },
+      maxSignals: 5,
+    };
+    await upsertAsyncWatch({ stateDir, watch });
+    const fetchMock = vi.fn(
+      async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const toolName = String(url).split("/tools/")[1]?.split("/invoke")[0];
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          arguments?: Record<string, unknown>;
+        };
+        if (toolName === "strategy.get_run") {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              tool_name: "strategy.get_run",
+              data: {
+                job_id: "claw_current_reversal",
+                status: "succeeded",
+                resolved_window: { end_date: "2026-06-18" },
+              },
+              meta: {},
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (toolName === "strategy.get_signals") {
+          const jobId = body.arguments?.job_id;
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              tool_name: "strategy.get_signals",
+              data:
+                jobId === "claw_previous_reversal"
+                  ? {
+                      items: [
+                        { symbol: "301288.SZ", name: "东华测试", end_date: "2026-06-17" },
+                        { symbol: "002345.SZ", name: "潮宏基", end_date: "2026-06-17" },
+                      ],
+                      delivery: {
+                        mode: "recent_window_only",
+                        used_fallback: false,
+                        window_end: "2026-06-18",
+                      },
+                    }
+                  : { items: [] },
+              meta: {},
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            tool_name: "strategy.task_describe",
+            data: {
+              signal_delivery: {
+                mode: "recent_window_only",
+                date_field: "end_date",
+                calendar_type: "trade_day",
+                recent_days: 2,
+                fallback_mode: "latest_one",
+                fallback_count: 1,
+                max_items: 5,
+              },
+            },
+            meta: {},
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await __testing.processPendingWatch({
+      api: createApi(stateDir),
+      stateDir,
+      watch,
+    });
+
+    const records = await listAutomationRuns({ stateDir });
+    const currentRecord = records.find(
+      (record) => record.businessJobId === "claw_current_reversal",
+    );
+    expect(currentRecord).toMatchObject({
+      returnedCount: 2,
+      symbols: ["301288.SZ", "002345.SZ"],
+    });
+    const [updated] = await listAsyncWatches(stateDir);
+    expect(updated).toMatchObject({
+      jobId: "claw_current_reversal",
+      signalDeliveryKind: "actionable",
+      dsInvoked: true,
+      callbackDeliveryStatus: "not-requested",
+    });
   });
 
   it("injects the CANSLIM boundary contract into actionable async callbacks", () => {

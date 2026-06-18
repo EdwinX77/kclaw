@@ -1,7 +1,8 @@
-import type { OpenClawPluginApi, OpenClawPluginToolContext } from "../../../src/plugins/types.js";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
+import type { OpenClawPluginApi, OpenClawPluginToolContext } from "../../../src/plugins/types.js";
+import { schedulePatternQuotationWatchNow } from "./async-watch-service.js";
 import {
   getAsyncWatch,
   listAsyncWatches,
@@ -38,10 +39,11 @@ type LocalToolDef = {
   ) => Promise<ToolResult>;
 };
 
-type SessionDeliverySnapshot = {
-  lastChannel?: string;
-  lastTo?: string;
-  lastAccountId?: string;
+type CompletionDeliverySnapshot = {
+  channel?: string;
+  to?: string;
+  accountId?: string;
+  threadId?: string | number;
 };
 
 async function appendAuditRecord(
@@ -54,11 +56,10 @@ async function appendAuditRecord(
     "agent-interactions.jsonl",
   );
   await fsPromises.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  await fsPromises.appendFile(
-    filePath,
-    `${JSON.stringify({ ts: Date.now(), ...record })}\n`,
-    { encoding: "utf-8", mode: 0o600 },
-  );
+  await fsPromises.appendFile(filePath, `${JSON.stringify({ ts: Date.now(), ...record })}\n`, {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
 }
 
 function resolveHeartbeatSnapshot(api: OpenClawPluginApi, agentId?: string) {
@@ -71,15 +72,63 @@ function resolveHeartbeatSnapshot(api: OpenClawPluginApi, agentId?: string) {
   };
 }
 
+function readOptionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readOptionalThreadId(value: unknown) {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function compactDeliverySnapshot(
+  snapshot: CompletionDeliverySnapshot,
+): CompletionDeliverySnapshot | undefined {
+  const compacted: CompletionDeliverySnapshot = {
+    ...(snapshot.channel ? { channel: snapshot.channel } : {}),
+    ...(snapshot.to ? { to: snapshot.to } : {}),
+    ...(snapshot.accountId ? { accountId: snapshot.accountId } : {}),
+    ...(snapshot.threadId !== undefined ? { threadId: snapshot.threadId } : {}),
+  };
+  return compacted.channel ||
+    compacted.to ||
+    compacted.accountId ||
+    compacted.threadId !== undefined
+    ? compacted
+    : undefined;
+}
+
+function resolveContextDeliverySnapshot(
+  ctx: OpenClawPluginToolContext,
+): CompletionDeliverySnapshot | undefined {
+  return compactDeliverySnapshot({
+    channel:
+      readOptionalString(ctx.deliveryContext?.channel) ?? readOptionalString(ctx.messageChannel),
+    to: readOptionalString(ctx.deliveryContext?.to),
+    accountId:
+      readOptionalString(ctx.deliveryContext?.accountId) ?? readOptionalString(ctx.agentAccountId),
+    threadId: readOptionalThreadId(ctx.deliveryContext?.threadId),
+  });
+}
+
 function resolveSessionDeliverySnapshot(params: {
   ctx: OpenClawPluginToolContext;
   api: OpenClawPluginApi;
   sessionKey?: string;
   agentId?: string;
-}): SessionDeliverySnapshot {
+}): CompletionDeliverySnapshot | undefined {
   const sessionKey = params.sessionKey?.trim() || params.ctx.sessionKey?.trim();
   if (!sessionKey) {
-    return {};
+    return undefined;
   }
   const agentId = params.agentId?.trim() || params.ctx.agentId?.trim();
   try {
@@ -89,20 +138,40 @@ function resolveSessionDeliverySnapshot(params: {
         agentId,
       },
     );
-    const store = JSON.parse(fs.readFileSync(storePath, "utf-8")) as Record<string, {
-      lastChannel?: string;
-      lastTo?: string;
-      lastAccountId?: string;
-    }>;
+    const store = JSON.parse(fs.readFileSync(storePath, "utf-8")) as Record<string, unknown>;
     const entry = store[sessionKey.toLowerCase()] ?? store[sessionKey];
-    return {
-      lastChannel: entry?.lastChannel,
-      lastTo: entry?.lastTo,
-      lastAccountId: entry?.lastAccountId,
-    };
+    if (!isRecord(entry)) {
+      return undefined;
+    }
+    const deliveryContext = isRecord(entry.deliveryContext) ? entry.deliveryContext : {};
+    return compactDeliverySnapshot({
+      channel: readOptionalString(deliveryContext.channel) ?? readOptionalString(entry.lastChannel),
+      to: readOptionalString(deliveryContext.to) ?? readOptionalString(entry.lastTo),
+      accountId:
+        readOptionalString(deliveryContext.accountId) ?? readOptionalString(entry.lastAccountId),
+      threadId:
+        readOptionalThreadId(deliveryContext.threadId) ?? readOptionalThreadId(entry.lastThreadId),
+    });
   } catch {
-    return {};
+    return undefined;
   }
+}
+
+function resolveCompletionDeliverySnapshot(params: {
+  ctx: OpenClawPluginToolContext;
+  api: OpenClawPluginApi;
+  sessionKey?: string;
+  agentId?: string;
+}) {
+  return (
+    resolveContextDeliverySnapshot(params.ctx) ??
+    resolveSessionDeliverySnapshot({
+      ctx: params.ctx,
+      api: params.api,
+      sessionKey: params.sessionKey,
+      agentId: params.agentId,
+    })
+  );
 }
 
 function formatLocalToolResult(data: Record<string, unknown>): ToolResult {
@@ -178,18 +247,9 @@ const localToolDefs: LocalToolDef[] = [
         registeredAt: now,
         updatedAt: now,
       };
-      const delivery = resolveSessionDeliverySnapshot({ ctx, api, sessionKey, agentId });
-      if (
-        typeof delivery.lastChannel === "string" ||
-        typeof delivery.lastTo === "string" ||
-        typeof delivery.lastAccountId === "string"
-      ) {
-        watch.deliverySnapshot = {
-          channel: typeof delivery.lastChannel === "string" ? delivery.lastChannel : undefined,
-          to: typeof delivery.lastTo === "string" ? delivery.lastTo : undefined,
-          accountId:
-            typeof delivery.lastAccountId === "string" ? delivery.lastAccountId : undefined,
-        };
+      const deliverySnapshot = resolveCompletionDeliverySnapshot({ ctx, api, sessionKey, agentId });
+      if (deliverySnapshot) {
+        watch.deliverySnapshot = deliverySnapshot;
       }
       const stateDir = api.runtime.state.resolveStateDir(process.env);
       await upsertAsyncWatch({ stateDir, watch });
@@ -207,8 +267,10 @@ const localToolDefs: LocalToolDef[] = [
           runLabel: watch.runLabel,
           wakeMode: watch.wakeMode,
           refreshDate: watch.refreshDate,
+          deliverySnapshot: watch.deliverySnapshot ?? null,
         },
       });
+      schedulePatternQuotationWatchNow({ api, stateDir, watch });
       const heartbeat = resolveHeartbeatSnapshot(api, watch.agentId);
       return formatLocalToolResult({
         ok: true,
@@ -223,7 +285,7 @@ const localToolDefs: LocalToolDef[] = [
           refresh_date: watch.refreshDate,
           heartbeat_enabled: heartbeat.enabled,
           heartbeat_summary: heartbeat.summary,
-          delivery_snapshot: delivery,
+          delivery_snapshot: watch.deliverySnapshot ?? null,
         },
       });
     },

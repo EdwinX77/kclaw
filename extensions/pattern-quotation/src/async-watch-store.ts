@@ -19,6 +19,7 @@ export type QuotationRefreshAsyncWatch = {
     channel?: string;
     to?: string;
     accountId?: string;
+    threadId?: string | number;
   };
   lastRemoteStatus?: string;
   deliveryStatus?: "delivered" | "not-delivered" | "not-requested";
