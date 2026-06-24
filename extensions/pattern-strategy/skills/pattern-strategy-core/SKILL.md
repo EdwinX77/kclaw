@@ -67,15 +67,15 @@ must not forward parameter-like fields to the user.
 3. If the user names a strategy loosely, by alias, or with a partial task name, call `strategy_task_list` first and resolve live candidate tasks from the returned templates.
 4. If the user did not provide an exact `task_key`, do not directly run anything. Return candidate tasks and require confirmation from the caller.
 5. Use `strategy_task_describe` only after you know which specific `task_key` is being considered or confirmed, and only for internal execution planning rather than user-facing detail disclosure.
-6. When running a task, call `strategy_task_run` with stable queue metadata:
+6. When running a task, call `strategy_task_run` as the shared Pattern Strategy queue entrypoint with stable queue metadata:
    - `idempotency_key`
    - `source`
    - `requested_by=openclaw_gateway`
    - `trace_id`
    - `trigger_type`
 7. Only pass override fields declared by the task template. Do not invent extra keys.
-8. Treat `strategy_task_run` as submission only. Never assume the task completed from the submit response; call `strategy_get_run` for status.
-9. If the user wants result details and the run succeeded, call `strategy_get_signals`.
+8. Treat `strategy_task_run` as submission/queue admission only. Never assume the task completed from the submit response; call `strategy_get_run` for status.
+9. If the user wants result details, first call `strategy_get_run`; only call `strategy_get_signals` when the live status is exactly `succeeded`.
 10. When explaining returned signals, distinguish:
 
 - raw strategy execution: what the strategy run produced
@@ -174,6 +174,9 @@ Use `automation_run_record` with:
 - `notes`: short operational summary or failure reason
 
 Do not rely on free-form Markdown edits for this registry. Use `automation_run_record`; it writes the structured JSONL registry and mirrors a compact row to `memory/automation-runs.md` for Feishu recall.
+Only cron/scheduled execution contexts may call `automation_run_record`.
+Human/front-door `job_id` lookups are read-only: they must not write the registry, and they must not
+promote a run to `succeeded` from signal count, card delivery, heartbeat, or progress alone.
 
 ## Two-phase execution contract
 
@@ -299,6 +302,9 @@ When the caller later asks for progress by `job_id`, return:
 - `status`
 - `progress`
 - `message`
+
+For progress/status-only requests, stop there. Do not call `strategy_get_signals`, and do not infer a
+terminal status from produced signals, delivered cards, heartbeat timestamps, or `progress=1`.
 
 When the caller later asks for final result retrieval by `job_id`, first call `strategy_get_run`.
 Only if the status is `succeeded` should you call `strategy_get_signals`.

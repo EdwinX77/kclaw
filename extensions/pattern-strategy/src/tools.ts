@@ -10,7 +10,6 @@ import {
   resolveLatestAvailableTradeDate,
   type LatestAvailableTradeDate,
 } from "./market-calendar.js";
-import { isFrontDoorAgentDirectExecution } from "./model-boundary-harness.js";
 import {
   findActiveStrategyWatch,
   isStrategyTerminalStatus,
@@ -121,33 +120,47 @@ async function findGatewayActiveWatch(params: {
   return findActiveStrategyWatch({ watches, submission: params.submission });
 }
 
-function createRemoteTool(api: OpenClawPluginApi, ctx: OpenClawPluginToolContext, def: ToolDef) {
+async function assertRunSucceededBeforeSignalFetch(params: {
+  api: OpenClawPluginApi;
+  toolParams: Record<string, unknown>;
+  pluginConfig?: PatternStrategyPluginConfig;
+}) {
+  const jobId = readRequiredString(params.toolParams, "job_id");
+  const payload = await invokePatternStrategyTool({
+    pluginConfig: params.pluginConfig,
+    toolName: "strategy.get_run",
+    args: { job_id: jobId },
+    logger: params.api.logger,
+  });
+  const result = await formatPatternStrategyResult({
+    remoteToolName: "strategy.get_run",
+    payload,
+    pluginConfig: params.pluginConfig,
+  });
+  const runData = dataRecord(result.details?.data);
+  const status = normalizeStrategyStatus(runData.status);
+  if (status !== "succeeded") {
+    throw new Error(`strategy_get_signals requires status=succeeded; job_id ${jobId} is ${status}`);
+  }
+}
+
+function createRemoteTool(api: OpenClawPluginApi, _ctx: OpenClawPluginToolContext, def: ToolDef) {
   return {
     name: def.name,
     label: def.label,
     description: def.description,
     parameters: def.parameters,
     async execute(_id: string, params: Record<string, unknown>) {
-      if (
-        isFrontDoorAgentDirectExecution({
-          agentId: ctx.agentId,
-          sessionKey: ctx.sessionKey,
-          toolName: def.name,
-        })
-      ) {
-        throw new Error(
-          "strategy_task_run is blocked for the Feishu group front-door agent. Resolve status through automation_run_latest/get_run, or delegate confirmed execution to the internal pattern-strategy agent.",
-        );
-      }
       let submission =
         def.remoteToolName === "strategy.task_run"
           ? validateStrategyTaskRunSubmission(params)
           : undefined;
       let latestTradeDate: LatestAvailableTradeDate | undefined;
       let remoteParams = params;
+      const pluginConfig = api.pluginConfig as PatternStrategyPluginConfig | undefined;
       if (submission?.triggerType === "cron") {
         latestTradeDate = await resolveLatestAvailableTradeDate({
-          pluginConfig: api.pluginConfig as PatternStrategyPluginConfig | undefined,
+          pluginConfig,
           logger: api.logger,
         });
         const normalized = normalizeCronStrategyTaskRunParams(params, latestTradeDate.tradeDate);
@@ -158,7 +171,7 @@ function createRemoteTool(api: OpenClawPluginApi, ctx: OpenClawPluginToolContext
         const activeWatch = await findGatewayActiveWatch({ api, submission });
         if (activeWatch) {
           const activePayload = await invokePatternStrategyTool({
-            pluginConfig: api.pluginConfig as PatternStrategyPluginConfig | undefined,
+            pluginConfig,
             toolName: "strategy.get_run",
             args: { job_id: activeWatch.jobId },
             logger: api.logger,
@@ -199,14 +212,20 @@ function createRemoteTool(api: OpenClawPluginApi, ctx: OpenClawPluginToolContext
                   gateway_deduped_by_job_id: activeWatch.jobId,
                 },
               },
-              pluginConfig: api.pluginConfig as PatternStrategyPluginConfig | undefined,
+              pluginConfig,
             });
           }
         }
       }
       const args =
         def.remoteToolName === "strategy.cancel_run" ? enforceManualCancel(params) : remoteParams;
-      const pluginConfig = api.pluginConfig as PatternStrategyPluginConfig | undefined;
+      if (def.remoteToolName === "strategy.get_signals") {
+        await assertRunSucceededBeforeSignalFetch({
+          api,
+          toolParams: args,
+          pluginConfig,
+        });
+      }
       const payload = await invokePatternStrategyTool({
         pluginConfig,
         toolName: def.remoteToolName,
@@ -248,7 +267,7 @@ const toolDefs: ToolDef[] = [
     name: "strategy_task_run",
     label: "Strategy Task Run",
     description:
-      "Submit a Pattern Strategy task run. Cron submissions are normalized through `market.latest_available_trade_date` before remote submission. Bridges remote tool `strategy.task_run`.",
+      "Submit a Pattern Strategy task run through the shared backend queue and return the authoritative `job_id` for user-visible processing status. `trigger_type` must be one of cron, gateway_recovery, manual, or retry; use manual for fresh Feishu user requests, not manual_retry. Cron submissions are normalized through `market.latest_available_trade_date` before remote submission. Bridges remote tool `strategy.task_run`.",
     remoteToolName: "strategy.task_run",
     parameters: objectSchema(
       {

@@ -591,7 +591,7 @@ describe("Pattern Strategy async watch notifications", () => {
           symbol: "002669.SZ",
           name: "康达新材",
           industry: "化学制品",
-          end_date: "2026-05-27",
+          end_date: "20260527",
           comment: "强枢轴突破，量价结构转强。",
         },
       ],

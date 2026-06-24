@@ -30,7 +30,11 @@ export function extractMarketDateText(value: unknown): MarketDateText | undefine
     }
   }
   const match = /\d{4}-\d{2}-\d{2}/.exec(trimmed);
-  return match?.[0] as MarketDateText | undefined;
+  if (match) {
+    return match[0] as MarketDateText;
+  }
+  const compact = /^(\d{4})(\d{2})(\d{2})$/.exec(trimmed);
+  return compact ? (`${compact[1]}-${compact[2]}-${compact[3]}` as MarketDateText) : undefined;
 }
 
 function hasExplicitTimezone(value: string) {
@@ -96,33 +100,4 @@ export function buildCanslimEnrichmentContract() {
     "The async watcher owns the Feishu card, per-symbol CANSLIM section labels, signal table, job metadata, and final message template.",
     "Keep CANSLIM, sentiment, heat, and trading principles as context only; they never replace the formal Pattern Strategy signal.",
   ].join("\n");
-}
-
-export function isFrontDoorAgentDirectExecution(params: {
-  agentId?: string;
-  sessionKey?: string;
-  toolName: string;
-}) {
-  if (params.toolName !== "strategy_task_run") {
-    return false;
-  }
-  const agentId = params.agentId?.trim();
-  if (agentId !== "tas-dispatch") {
-    return false;
-  }
-  const sessionKey = params.sessionKey?.trim() ?? "";
-  if (sessionKey.includes(":cron:")) {
-    return false;
-  }
-  return isFeishuGroupSessionKey(sessionKey);
-}
-
-function isFeishuGroupSessionKey(sessionKey: string) {
-  const parts = sessionKey
-    .toLowerCase()
-    .split(":")
-    .map((part) => part.trim())
-    .filter(Boolean);
-  const feishuIndex = parts.indexOf("feishu");
-  return feishuIndex >= 0 && parts[feishuIndex + 1] === "group";
 }

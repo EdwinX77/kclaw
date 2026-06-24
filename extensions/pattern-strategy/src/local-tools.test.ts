@@ -91,6 +91,37 @@ describe("Pattern Strategy local watch tools", () => {
     expect(shiftMarketDateByMonths("2026-05-31", -3)).toBe("2026-02-28");
   });
 
+  it("hides automation read tools from cron execution sessions", async () => {
+    const sessionKey = "agent:tas-dispatch:cron:mid-term-accel:run:cron-run-1";
+    const storePath = await writeSessionStore(sessionKey);
+    const api = createApi(storePath);
+
+    const cronTools = createPatternStrategyLocalTools(api, {
+      config: { session: { store: storePath } },
+      agentId: "tas-dispatch",
+      sessionKey,
+    });
+    const cronToolNames = cronTools.map((tool) => tool.name);
+
+    expect(cronToolNames).not.toContain("automation_run_daily_summary");
+    expect(cronToolNames).not.toContain("automation_run_latest");
+    expect(cronToolNames).not.toContain("automation_run_list");
+    expect(cronToolNames).toContain("automation_run_record");
+    expect(cronToolNames).toContain("strategy_watch_run");
+
+    const frontDoorTools = createPatternStrategyLocalTools(api, {
+      config: { session: { store: storePath } },
+      agentId: "tas-dispatch",
+      sessionKey: "agent:tas-dispatch:feishu:group:oc_test",
+    });
+    const frontDoorToolNames = frontDoorTools.map((tool) => tool.name);
+
+    expect(frontDoorToolNames).toContain("automation_run_daily_summary");
+    expect(frontDoorToolNames).toContain("automation_run_latest");
+    expect(frontDoorToolNames).toContain("automation_run_list");
+    expect(frontDoorToolNames).not.toContain("automation_run_record");
+  });
+
   it("ignores bogus session keys and preserves enrichment for daily scans", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(latestTradeDateResponse());
     const sessionKey = "agent:tas-dispatch:cron:mid-term-accel";

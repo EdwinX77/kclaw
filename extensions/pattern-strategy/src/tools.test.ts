@@ -147,6 +147,184 @@ describe("Pattern Strategy remote tools", () => {
     });
   });
 
+  it("allows the Feishu group front-door to enter the shared strategy queue", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          tool_name: "strategy.task_run",
+          data: {
+            job_id: "manual-group-run-1",
+            status: "queued",
+          },
+        }),
+      ),
+    );
+    const ctx = {
+      agentId: "tas-dispatch",
+      sessionKey: "agent:tas-dispatch:feishu:group:oc_group:sender:ou_user",
+    };
+    const tool = createPatternStrategyTools(
+      createApi({ stateDir: await makeTempStateDir() }),
+      ctx as OpenClawPluginToolContext,
+    ).find((candidate) => candidate.name === "strategy_task_run");
+    if (!tool) {
+      throw new Error("missing strategy_task_run");
+    }
+
+    const result = await tool.execute("call-feishu-group-manual", {
+      task_key: "strategy.mid_term_accel.daily_scan",
+      idempotency_key: "manual-mid-term-accel-2026-06-23-om_1",
+      source: "feishu_group",
+      requested_by: "openclaw_gateway",
+      trace_id: "feishu:om_1",
+      trigger_type: "manual",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://pattern-strategy.local/tools/strategy.task_run/invoke",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          arguments: {
+            task_key: "strategy.mid_term_accel.daily_scan",
+            idempotency_key: "manual-mid-term-accel-2026-06-23-om_1",
+            source: "feishu_group",
+            requested_by: "openclaw_gateway",
+            trace_id: "feishu:om_1",
+            trigger_type: "manual",
+          },
+          context: {
+            source: "openclaw_agent",
+          },
+        }),
+      }),
+    );
+    const parsed = JSON.parse(result.content[0]!.text);
+    expect(parsed.data).toMatchObject({
+      job_id: "manual-group-run-1",
+      status: "queued",
+    });
+  });
+
+  it("blocks signal fetch until the live run status is succeeded", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          tool_name: "strategy.get_run",
+          data: {
+            job_id: "active-run-1",
+            status: "running",
+            progress: 1,
+          },
+        }),
+      ),
+    );
+    const ctx = { agentId: "tas-dispatch", sessionKey: "agent:tas-dispatch:feishu:group:oc_test" };
+    const tool = createPatternStrategyTools(
+      createApi({ stateDir: await makeTempStateDir() }),
+      ctx as OpenClawPluginToolContext,
+    ).find((candidate) => candidate.name === "strategy_get_signals");
+    if (!tool) {
+      throw new Error("missing strategy_get_signals");
+    }
+
+    await expect(
+      tool.execute("call-signals", {
+        job_id: "active-run-1",
+        limit: 20,
+        order: "desc",
+      }),
+    ).rejects.toThrow(
+      "strategy_get_signals requires status=succeeded; job_id active-run-1 is running",
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://pattern-strategy.local/tools/strategy.get_run/invoke",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          arguments: {
+            job_id: "active-run-1",
+          },
+          context: {
+            source: "openclaw_agent",
+          },
+        }),
+      }),
+    );
+  });
+
+  it("fetches signals after confirming the live run status is succeeded", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            tool_name: "strategy.get_run",
+            data: {
+              job_id: "finished-run-1",
+              status: "succeeded",
+            },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            tool_name: "strategy.get_signals",
+            data: [{ symbol: "688563", name: "航材股份", signal_date: "2026-06-23" }],
+          }),
+        ),
+      );
+    const ctx = { agentId: "tas-dispatch", sessionKey: "agent:tas-dispatch:feishu:group:oc_test" };
+    const tool = createPatternStrategyTools(
+      createApi({ stateDir: await makeTempStateDir() }),
+      ctx as OpenClawPluginToolContext,
+    ).find((candidate) => candidate.name === "strategy_get_signals");
+    if (!tool) {
+      throw new Error("missing strategy_get_signals");
+    }
+
+    const result = await tool.execute("call-signals", {
+      job_id: "finished-run-1",
+      limit: 20,
+      order: "desc",
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://pattern-strategy.local/tools/strategy.get_run/invoke",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://pattern-strategy.local/tools/strategy.get_signals/invoke",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          arguments: {
+            job_id: "finished-run-1",
+            limit: 20,
+            order: "desc",
+          },
+          context: {
+            source: "openclaw_agent",
+          },
+        }),
+      }),
+    );
+    const parsed = JSON.parse(result.content[0]!.text);
+    expect(parsed.data).toEqual([
+      { symbol: "688563", name: "航材股份", signal_date: "2026-06-23" },
+    ]);
+  });
+
   it("normalizes stale cron strategy keys through the latest trade date service", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")

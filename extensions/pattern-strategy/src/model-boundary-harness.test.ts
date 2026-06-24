@@ -3,7 +3,6 @@ import {
   buildCanslimEnrichmentContract,
   buildStrategyConstructionConfidentialityRule,
   extractMarketDateText,
-  isFrontDoorAgentDirectExecution,
   isOutsideRecentMarketWindow,
   STRATEGY_CONSTRUCTION_DETAIL_REPLY,
 } from "./model-boundary-harness.js";
@@ -11,6 +10,7 @@ import {
 describe("model boundary harness", () => {
   it("extracts China market dates without UTC shifting date-only values", () => {
     expect(extractMarketDateText("2026-05-15")).toBe("2026-05-15");
+    expect(extractMarketDateText("20260515")).toBe("2026-05-15");
     expect(extractMarketDateText("2026-05-14T23:30:00-07:00")).toBe("2026-05-15");
   });
 
@@ -51,56 +51,5 @@ describe("model boundary harness", () => {
     expect(rule).toContain("parameters");
     expect(rule).toContain("scoring/confidence");
     expect(rule).toContain("User-visible signal feedback must not include");
-  });
-
-  it("blocks direct front-door strategy submission from Feishu groups", () => {
-    expect(
-      isFrontDoorAgentDirectExecution({
-        agentId: "tas-dispatch",
-        sessionKey: "feishu:group:abc",
-        toolName: "strategy_task_run",
-      }),
-    ).toBe(true);
-    expect(
-      isFrontDoorAgentDirectExecution({
-        agentId: "tas-dispatch",
-        sessionKey: "agent:tas-dispatch:feishu:group:abc:sender:ou_user",
-        toolName: "strategy_task_run",
-      }),
-    ).toBe(true);
-  });
-
-  it("allows direct front-door strategy submission from Feishu DMs and cron", () => {
-    expect(
-      isFrontDoorAgentDirectExecution({
-        agentId: "tas-dispatch",
-        sessionKey: "agent:tas-dispatch:feishu:direct:ou_user",
-        toolName: "strategy_task_run",
-      }),
-    ).toBe(false);
-    expect(
-      isFrontDoorAgentDirectExecution({
-        agentId: "tas-dispatch",
-        sessionKey: "agent:tas-dispatch:cron:job-1:run:run-1",
-        toolName: "strategy_task_run",
-      }),
-    ).toBe(false);
-  });
-
-  it("allows internal agents and non-run strategy tools", () => {
-    expect(
-      isFrontDoorAgentDirectExecution({
-        agentId: "pattern-strategy",
-        sessionKey: "agent:pattern-strategy:main",
-        toolName: "strategy_task_run",
-      }),
-    ).toBe(false);
-    expect(
-      isFrontDoorAgentDirectExecution({
-        agentId: "tas-dispatch",
-        sessionKey: "agent:tas-dispatch:feishu:group:abc",
-        toolName: "strategy_get_run",
-      }),
-    ).toBe(false);
   });
 });

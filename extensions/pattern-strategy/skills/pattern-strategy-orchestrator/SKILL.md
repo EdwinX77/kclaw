@@ -11,7 +11,7 @@ Use this skill on the top-level Feishu-facing agent. This agent is the only one 
 
 Recommended internal layout:
 
-- front-door agent: bound to Feishu DMs and groups, parses user intent, directly calls `chan_generate_chart` for chart-only requests, may submit confirmed DM strategy runs, delegates group/ambiguous/longer workflows, and writes the final reply
+- front-door agent: bound to Feishu DMs and groups, parses user intent, directly calls `chan_generate_chart` for chart-only requests, submits confirmed strategy runs through `strategy_task_run`, delegates ambiguous discovery/longer analysis, and writes the final reply
 - `pattern-chan`: standalone legacy Chan chart worker; the front-door agent should not have A2A access to it for normal Feishu chart-only requests
 - `pattern-strategy`: runs the Pattern Strategy task bridge and returns raw run/status/signal data; it also owns supporting board-index refresh tools
 - `pattern-quotation`: an independent Agent that runs the Pattern Quotation MCP sub-service for quotation and information refreshes
@@ -40,7 +40,8 @@ Classify the user request before choosing an internal agent. Apply this priority
    - Match examples: `刷新板块指数`, `刷新行业指数`, `刷新概念指数`, `刷新全市场成交额`.
    - Route to `pattern-strategy` and require `indice_refresh_run/get/errors`; use `indice_watch_refresh` for long-running scheduled jobs.
 4. Strategy task intent applies when the user asks to run, inspect, cancel, or retrieve formal strategy tasks/signals.
-   - Route to `pattern-strategy`.
+   - For exact or confirmed submissions, call `strategy_task_run` directly from the front-door agent.
+   - Use the internal `pattern-strategy` session only for unresolved candidate discovery, status/signal lookup, or supporting analysis.
 
 ## Mandatory boundary
 
@@ -49,7 +50,7 @@ For any Pattern Strategy task discovery, execution, status tracking, cancellatio
 - do not answer from local repo files
 - do not inspect extension source as a substitute for live task execution
 - do not infer task availability from examples alone
-- always delegate to the internal `pattern-strategy` agent first
+- use live Pattern Strategy tools. Exact or confirmed submissions must call `strategy_task_run` directly from the front-door agent; delegate only unresolved discovery, status/signal lookup, or supporting analysis.
 
 For any Chan chart, 缠论图, or 走势结构图 request for a stock, ETF, or security:
 
@@ -95,14 +96,41 @@ the front-door agent must not start with:
 The required first recovery path is:
 
 1. use `automation_run_latest` when the user asks for the latest scheduled/cron strategy run
-2. identify the relevant `job_id` or ask the internal `pattern-strategy` agent to locate the latest relevant run
-3. call the internal `pattern-strategy` agent for live `get_run`
-4. if the run succeeded, call the internal `pattern-strategy` agent for live `get_signals`
+2. identify the relevant `job_id`
+3. call `strategy_get_run` for live status
+4. if and only if the live run status is `succeeded`, call `strategy_get_signals`
 5. only after formal signal retrieval may enrichment be delegated to `market-research`
 
-The front-door agent may summarize, rank, enrich, and submit confirmed strategy runs from Feishu DMs. In Feishu groups, do not directly submit `strategy_task_run`; use the internal `pattern-strategy` agent after the task is explicit or confirmed.
+The front-door agent may summarize, rank, enrich, and submit confirmed strategy runs from Feishu DMs and Feishu groups. `strategy_task_run` is the single Pattern Strategy queue submission entrypoint for cron, recovery, manual Feishu requests, and retries. After the task is explicit or confirmed, submit with `strategy_task_run` directly so the request enters that shared backend queue and the first user-visible acknowledgement can include the Pattern Strategy `job_id`.
 
 User-visible replies may include only operational fields a normal customer can act on: strategy display name, requested date/window, Pattern Strategy `job_id` when one exists, status, progress/message, signal date, and symbol/name. Never expose `idempotency_key`, `request_key`, `trace_id`, `requested_by`, `trigger_type`, `childSessionKey`, OpenClaw `runId`, subagent labels/ids, `overrides`, `resolved_window`, or raw internal-agent advice unless Edwin explicitly asks for internal diagnostics.
+
+For a status-only `job_id` lookup such as "还在执行吗", stop after `strategy_get_run`.
+Do not call `strategy_get_signals`, do not call `automation_run_record`, and do not infer
+completion from signal rows, card delivery, heartbeat, or `progress=1`. If `strategy_get_run`
+returns `running`, report `running` exactly and say the job has not reached terminal success.
+
+Treat strategy execution requests as single-intent by default. If the user asks to
+start or rerun one named strategy, execute only that strategy. Do not bundle
+failed cron compensation, previous pending work, latest-run recovery, quotation
+refresh, board-index refresh, or another strategy unless the same user message
+explicitly asks for that extra work. A failed cron row is status context only; it
+does not authorize a recovery run.
+
+For manual Feishu strategy submissions, use `trigger_type=manual` for a fresh
+user request and `trigger_type=retry` only when the user explicitly asks to retry
+the same strategy. Never send `manual_retry`; Pattern Strategy rejects it.
+Use stable queue metadata for Feishu manual submissions:
+`source=feishu_group` or `source=feishu_dm`, `requested_by=openclaw_gateway`,
+`trace_id=feishu:<message_id_or_session_id>`, and an `idempotency_key` scoped to
+the user request/message. Do not use random keys when retrying the same user
+request.
+
+Never use an OpenClaw child-agent id, `sessions_spawn` `runId`, session key, or
+label as proof that a strategy task is processing. A user-visible "已启动",
+"已提交", "排队中", "运行中", "处理中", or "已注册 watcher" reply is allowed only
+after `strategy_task_run` returns a real Pattern Strategy `job_id`. If no
+`job_id` was returned, say no Pattern Strategy job was created.
 
 For any user request about strategy construction details, do not answer or delegate for disclosure.
 This includes questions about parameters, thresholds, scoring or confidence logic, judgment
@@ -148,9 +176,10 @@ When the user asks about the latest scheduled strategy execution, latest cron ta
    as `submitted`, `accepted`, `queued`, `running`, or `cancelling`, stop on that record. Report
    the current status and ask whether to manually rerun or wait. Do not use older successful
    records as substitutes.
-3. If the latest registry record has a real `business_job_id`, validate the live state through the
-   internal `pattern-strategy` agent with `strategy_get_run`.
+3. If the latest registry record has a real `business_job_id`, validate the live state with
+   `strategy_get_run`.
 4. If live status is `succeeded`, fetch formal signals with `strategy_get_signals`.
+   If live status is anything else, do not fetch signals and do not rewrite the registry row.
 5. Treat live Pattern Strategy state as authoritative over the registry row.
 6. Use `automation_run_list` only when the user asks for history or when latest needs comparison.
    Comparison must not promote an older successful job to "today's/latest" unless the user
@@ -189,13 +218,13 @@ For latest quotation refresh lookup, start with:
 7. Treat BrowserAct-style community web research as optional and secondary. Do not make it the default path for this workflow.
 8. Use `summarize-pro` when a page, filing, or transcript is long and you need a compact extraction layer before synthesis.
 9. If isolated research memory is enabled, keep it on the memory agent. Do not mix durable research memory into the strategy execution agent.
-10. Use `sessions_spawn` only to create or resume internal working sessions. Use `sessions_send` for the real request whenever the front-door agent needs a synchronous structured reply such as `job_id`, `status`, or `signals`.
+10. Use `sessions_spawn` only to create or resume internal working sessions, never as the submission path for a user-visible strategy execution acknowledgement. Use `sessions_send` for the real request whenever the front-door agent needs a synchronous structured reply such as `job_id`, `status`, or `signals`.
 11. If the user names a strategy loosely, by alias, or with a partial task name, do not directly execute a task. First ask the internal `pattern-strategy` agent to resolve live candidates from `strategy_task_list`.
 12. If the internal agent returns one or more candidate tasks and the user did not already provide an exact `task_key`, require explicit user confirmation before execution.
 13. If the user asks to refresh quotation or market information data, delegate to `pattern-quotation`; do not route that request through the strategy agent.
 14. The front-door agent owns the user confirmation turn. Internal agents may suggest candidates, but they must not make the final execution choice on behalf of the user unless the user already provided an exact `task_key`.
-15. In Feishu DMs, if the user already provided an exact `task_key` or confirmed one candidate, the front-door agent may call `strategy_task_run` directly and then register `strategy_watch_run`.
-16. In Feishu groups, never call `strategy_task_run` directly from the front-door agent. The plugin guard blocks this path; delegate confirmed execution to the internal `pattern-strategy` agent.
+15. In Feishu DMs and Feishu groups, if the user already provided an exact `task_key` or confirmed one candidate, the front-door agent may call `strategy_task_run` directly and then register `strategy_watch_run`.
+16. Do not route exact or confirmed strategy submission through `sessions_spawn` or `sessions_send`; those tools are only for discovery, supporting analysis, or follow-up work.
 17. If the user asks for a Chan chart, call `chan_generate_chart` directly from the front-door agent. This is an immediate chart-generation request for personal or group conversations, not a strategy task run, so it does not need `sessions_send`, task candidate confirmation, or async watch registration. Let the runtime deliver the chart image from tool details, then add a compact Chan-theory reading covering stage, main box/central-zone bounds, and overall structure.
 18. Never expose raw internal tool markup or child-session output to the end user. Suppress and ignore any content that looks like:
 
@@ -212,8 +241,8 @@ For latest quotation refresh lookup, start with:
 1. Parse the user request.
 2. If the user is asking about Chan chart generation, call `chan_generate_chart` directly and return one chart caption plus a compact Chan-theory reading. Do not call `sessions_send`, do not call `sessions_spawn`, and do not ask `pattern-chan` to answer. The runtime handles image delivery separately.
 3. If the user is asking about quotation or market information refreshes, send the request to `agent:pattern-quotation:main` with `sessions_send`. Never use `sessions_spawn` for `pattern-quotation`.
-4. If the user is asking about strategy tasks or execution from a Feishu group, use the internal `pattern-strategy` agent for task resolution and confirmed submission.
-5. If the user is asking about strategy tasks or execution from a Feishu DM and has already provided an exact `task_key` or confirmed one candidate, submit directly with `strategy_task_run`.
+4. If the user is asking about strategy tasks or execution from a Feishu group or DM and has already provided an exact `task_key` or confirmed one candidate, submit directly with `strategy_task_run`.
+5. Use the internal `pattern-strategy` agent only for task resolution, status, signal retrieval, or supporting work when the task is not yet exact.
 6. If the user did not provide an exact `task_key`, require the internal strategy agent to return the latest live task candidates before any execution attempt.
 7. If the internal strategy agent returns `needs_confirmation=true`, ask the user to confirm the intended task and stop there until the user answers.
 8. Only after an exact `task_key` is provided or explicitly confirmed should the chosen task be submitted.
@@ -226,7 +255,7 @@ For latest quotation refresh lookup, start with:
    - `overrides`
      These fields are for internal orchestration; do not forward parameter-like fields to Feishu.
 10. After the front-door agent has `job_id`, it must acknowledge the run to the user immediately instead of waiting for final strategy completion.
-11. If submission fails before a `job_id` is returned, do not say the task was submitted, queued, running, or being executed. Tell the user the strategy task was not accepted and no `job_id` was created, then give the failing layer in one sentence.
+11. If submission fails before a `job_id` is returned, do not say the task was submitted, queued, running, processing, or being executed. Tell the user the strategy task was not accepted and no `job_id` was created, then give the failing layer in one sentence.
 12. If the returned status is nonterminal, register async tracking for that `job_id` so completion can be handed back through the main session. Prefer the local watch tool path over waiting in the first turn.
 13. If the result later includes candidate symbols and the user needs context or final Feishu packaging, enrich in two stages:
 
@@ -286,9 +315,9 @@ Treat strategy execution as a two-phase flow:
 1. submission phase
    - resolve the exact `task_key`
    - prepare allowed `overrides`
-   - from a Feishu DM, call `strategy_task_run` directly when the task is exact or confirmed
-   - from a Feishu group, call the internal `pattern-strategy` agent and require it to call `strategy_task_run`
+   - from a Feishu DM or Feishu group, call `strategy_task_run` directly when the task is exact or confirmed
    - use stable `idempotency_key`, `source`, `requested_by=openclaw_gateway`, `trace_id`, and `trigger_type`
+   - let Pattern Strategy handle shared queueing, leases, same-strategy concurrency, and idempotent duplicate detection
    - return `job_id` immediately
 2. completion phase
    - use `job_id` as the durable identifier for progress, cancellation, signal lookup, and final synthesis
@@ -336,8 +365,8 @@ OpenClaw subagent announce is best-effort; it is not the same thing as durable s
 
 Use this shape for internal delegation:
 
-- use delegation for Feishu group strategy submissions, ambiguous strategy names, live candidate resolution, or enrichment work
-- do not spawn a `pattern-strategy` child merely to submit an exact or confirmed strategy task from a Feishu DM
+- use delegation for ambiguous strategy names, live candidate resolution, status/signal lookup, or enrichment work
+- do not spawn a `pattern-strategy` child merely to submit an exact or confirmed strategy task from a Feishu DM or Feishu group
 - if a suitable internal session already exists, use it directly with `sessions_send`
 - only if no suitable child session exists, call `sessions_spawn`
 - when spawning a child for internal setup, set `expectsCompletionMessage=false`; otherwise the child result can be mirrored directly to Feishu before the front-door agent sanitizes it
@@ -346,24 +375,22 @@ Use this shape for internal delegation:
   - `market-research`
   - `market-memory`
 - give the child a short `label`
-- use `task` only to establish the child session
+- use `task` only to establish the child session for discovery, status lookup, signal retrieval, or enrichment
 - when spawning only for setup, set `expectsCompletionMessage=false` so raw child output is never mirrored to the end user
 - then use `sessions_send` with `timeoutSeconds > 0` for the real structured request when you need a result back in the current turn
 
 Examples:
 
 - spawn `pattern-strategy` with a task like:
-  - `Open an internal Pattern Strategy working session for task discovery and execution.`
+  - `Open an internal Pattern Strategy working session for task discovery and status lookup.`
 - spawn `pattern-strategy` with:
   - `expectsCompletionMessage=false`
 - spawn `pattern-strategy` with a task like:
-  - `Prepare to resolve live task candidates and submit strategy runs.`
+  - `Prepare to resolve live task candidates and inspect existing strategy runs.`
 - spawn `pattern-strategy` with:
   - `expectsCompletionMessage=false`
 - send to `pattern-strategy` with a message like:
   - `The user said "mid_term_accel". Resolve live candidates from strategy_task_list. If the user did not provide an exact task_key, return candidates plus needs_confirmation=true instead of executing.`
-- send to `pattern-strategy` with a message like:
-  - `Run task_key strategy.mid_term_accel.daily_scan with the allowed overrides only. Use idempotency_key cron-mid-term-accel-YYYY-MM-DD, source openclaw_cron, requested_by openclaw_gateway, trace_id from the Gateway request, and trigger_type cron. Stop after strategy_task_run and return task_key, job_id, status, request_key, resolved_window, and overrides. Do not wait for final signals in this turn.`
 - send to `pattern-strategy` with a message like:
   - `Using job_id claw_xxx, fetch the current run status only. Return job_id, status, progress, and message.`
 - send to `pattern-strategy` with a message like:
@@ -381,8 +408,8 @@ Examples:
 - spawn `market-research` with a task like:
   - `For these symbols, first build CANSLIM context from factor MCP tool outputs, then collect non-CANSLIM heat and retail sentiment using web_search, web_fetch, and browser only when needed.`
 
-Do not use a made-up session key or label as a substitute for spawning. If no child session exists yet, create one with `sessions_spawn`.
-Do not skip this step by reading local files or by answering from remembered examples.
+When delegation is actually needed, do not use a made-up session key or label as a substitute for spawning. If no child session exists yet, create one with `sessions_spawn`.
+Do not skip live tools by reading local files or by answering from remembered examples.
 
 ## Front-Door Discipline
 
@@ -398,7 +425,9 @@ It must not:
 
 It must:
 
-- route strategy discovery/execution/status requests straight to the `pattern-strategy` internal session
+- submit exact or confirmed strategy execution requests through `strategy_task_run`
+- use live Pattern Strategy status/signal tools for `job_id` lookups
+- use the internal `pattern-strategy` session only for unresolved candidate discovery or supporting work
 - keep user-facing replies short
 - return only actionable confirmations, job ids, statuses, signals, and final summaries
 

@@ -265,12 +265,24 @@ function inferCronJobId(ctx: OpenClawPluginToolContext) {
   return match?.[1];
 }
 
+const cronBlockedAutomationReadTools = new Set([
+  "automation_run_daily_summary",
+  "automation_run_latest",
+  "automation_run_list",
+]);
+
+const cronOnlyAutomationWriteTools = new Set(["automation_run_record"]);
+
+function isCronExecutionContext(ctx: OpenClawPluginToolContext) {
+  return Boolean(ctx.sessionKey?.includes(":cron:"));
+}
+
 const localToolDefs: LocalToolDef[] = [
   {
     name: "automation_run_record",
     label: "Automation Run Record",
     description:
-      "Record a scheduled business automation run in the Pattern Strategy registry and mirror a compact row to memory/automation-runs.md for Feishu recall.",
+      "Cron execution only: record a scheduled business automation run in the Pattern Strategy registry and mirror a compact row to memory/automation-runs.md for Feishu recall.",
     parameters: objectSchema(
       {
         run_time: stringSchema(),
@@ -323,7 +335,7 @@ const localToolDefs: LocalToolDef[] = [
     name: "automation_run_latest",
     label: "Automation Run Latest",
     description:
-      "Return the latest recorded automation run, optionally filtered by category, task_family, task_key, status, or source.",
+      "Human lookup only: return the latest recorded automation run, optionally filtered by category, task_family, task_key, status, or source. Not exposed to cron execution sessions.",
     parameters: objectSchema({
       category: stringSchema(),
       task_family: stringSchema(),
@@ -346,7 +358,7 @@ const localToolDefs: LocalToolDef[] = [
     name: "automation_run_list",
     label: "Automation Run List",
     description:
-      "List recorded automation runs, optionally filtered by category, task_family, task_key, status, source, and limit.",
+      "Human lookup only: list recorded automation runs, optionally filtered by category, task_family, task_key, status, source, and limit. Not exposed to cron execution sessions.",
     parameters: objectSchema({
       category: stringSchema(),
       task_family: stringSchema(),
@@ -370,7 +382,7 @@ const localToolDefs: LocalToolDef[] = [
     name: "automation_run_daily_summary",
     label: "Automation Run Daily Summary",
     description:
-      "Return recorded automation runs for one China A-share market date. Use this first for Feishu questions about today's cron or scheduled strategy execution.",
+      "Human lookup only: return recorded automation runs for one China A-share market date. Use this first for Feishu questions about today's cron or scheduled strategy execution. Not exposed to cron execution sessions.",
     parameters: objectSchema({
       market_date: stringSchema(),
       category: stringSchema(),
@@ -789,7 +801,11 @@ export function createPatternStrategyLocalTools(
   api: OpenClawPluginApi,
   ctx: OpenClawPluginToolContext,
 ) {
-  return localToolDefs.map((def) => ({
+  const cronExecutionContext = isCronExecutionContext(ctx);
+  const visibleDefs = cronExecutionContext
+    ? localToolDefs.filter((def) => !cronBlockedAutomationReadTools.has(def.name))
+    : localToolDefs.filter((def) => !cronOnlyAutomationWriteTools.has(def.name));
+  return visibleDefs.map((def) => ({
     name: def.name,
     label: def.label,
     description: def.description,
