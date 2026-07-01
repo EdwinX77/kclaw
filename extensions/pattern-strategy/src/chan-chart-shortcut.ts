@@ -15,10 +15,12 @@ export type ChanChartShortcutRequest = {
   securityName?: string;
   startDate: string;
   endDate: string;
+  rangeLabel: string;
 };
 
 const CHAN_CHART_PATTERN = /(?:chan\s*(?:图|chart|走势图)|缠(?:论)?(?:图|走势图|走势))/iu;
 const YEAR_TO_DATE_PATTERN = /(?:今年以来|年初至今|今年)/u;
+const RECENT_HALF_YEAR_PATTERN = /(?:最近|近|过去)\s*(?:半\s*年|6\s*(?:个)?月|六\s*(?:个)?月)/u;
 const STOCK_SYMBOL_PATTERN = /\b((?:0|3|6|8|4)\d{5})(?:\.(?:SH|SZ|BJ))?\b/iu;
 const LEADING_REQUEST_WORDS = [
   "请给我下",
@@ -42,7 +44,14 @@ const LEADING_REQUEST_WORDS = [
   "下",
 ] as const;
 
-function formatShanghaiDate(date: Date): string {
+type DateWindow = {
+  startDate: string;
+  endDate: string;
+  rangeLabel: string;
+  dateMatch: RegExpExecArray;
+};
+
+function getShanghaiDateParts(date: Date): { year: number; month: number; day: number } {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
     year: "numeric",
@@ -50,7 +59,62 @@ function formatShanghaiDate(date: Date): string {
     day: "2-digit",
   }).formatToParts(date);
   const read = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
-  return `${read("year")}-${read("month")}-${read("day")}`;
+  return {
+    year: Number(read("year")),
+    month: Number(read("month")),
+    day: Number(read("day")),
+  };
+}
+
+function formatDateParts(parts: { year: number; month: number; day: number }): string {
+  return [
+    String(parts.year).padStart(4, "0"),
+    String(parts.month).padStart(2, "0"),
+    String(parts.day).padStart(2, "0"),
+  ].join("-");
+}
+
+function formatShanghaiDate(date: Date): string {
+  return formatDateParts(getShanghaiDateParts(date));
+}
+
+function daysInMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+function shiftShanghaiMonths(date: Date, deltaMonths: number): string {
+  const parts = getShanghaiDateParts(date);
+  const shifted = new Date(Date.UTC(parts.year, parts.month - 1 + deltaMonths, 1));
+  const year = shifted.getUTCFullYear();
+  const month = shifted.getUTCMonth() + 1;
+  const day = Math.min(parts.day, daysInMonth(year, month));
+  return formatDateParts({ year, month, day });
+}
+
+function resolveDateWindow(text: string, now: Date): DateWindow | undefined {
+  const endDate = formatShanghaiDate(now);
+  const recentHalfYearMatch = RECENT_HALF_YEAR_PATTERN.exec(text);
+  if (recentHalfYearMatch) {
+    const startDate = shiftShanghaiMonths(now, -6);
+    return {
+      startDate,
+      endDate,
+      rangeLabel: `最近半年（${startDate} 至 ${endDate}）`,
+      dateMatch: recentHalfYearMatch,
+    };
+  }
+
+  const yearToDateMatch = YEAR_TO_DATE_PATTERN.exec(text);
+  if (yearToDateMatch) {
+    return {
+      startDate: `${endDate.slice(0, 4)}-01-01`,
+      endDate,
+      rangeLabel: "今年以来",
+      dateMatch: yearToDateMatch,
+    };
+  }
+
+  return undefined;
 }
 
 function stripLeadingRequestWords(value: string): string {
@@ -68,12 +132,7 @@ function stripLeadingRequestWords(value: string): string {
   return next.replace(/^[:：,，\s]+|(?:的|这只|这支|股票)$/gu, "").trim();
 }
 
-function extractSecurityName(text: string): string | undefined {
-  const dateMatch = YEAR_TO_DATE_PATTERN.exec(text);
-  if (!dateMatch) {
-    return undefined;
-  }
-
+function extractSecurityName(text: string, dateMatch: RegExpExecArray): string | undefined {
   const chartMatch = CHAN_CHART_PATTERN.exec(text);
   const beforeDate = text.slice(0, dateMatch.index).trim();
   const afterDate =
@@ -104,22 +163,26 @@ export function resolveChanChartShortcutRequest(
   now: Date = new Date(),
 ): ChanChartShortcutRequest | undefined {
   const normalized = content.replace(/\s+/g, " ").trim();
-  if (!CHAN_CHART_PATTERN.test(normalized) || !YEAR_TO_DATE_PATTERN.test(normalized)) {
+  if (!CHAN_CHART_PATTERN.test(normalized)) {
+    return undefined;
+  }
+  const dateWindow = resolveDateWindow(normalized, now);
+  if (!dateWindow) {
     return undefined;
   }
 
   const symbol = extractSymbol(normalized);
-  const securityName = extractSecurityName(normalized);
+  const securityName = extractSecurityName(normalized, dateWindow.dateMatch);
   if (!symbol && !securityName) {
     return undefined;
   }
 
-  const endDate = formatShanghaiDate(now);
   return {
     ...(symbol ? { symbol } : {}),
     ...(securityName ? { securityName } : {}),
-    startDate: `${endDate.slice(0, 4)}-01-01`,
-    endDate,
+    startDate: dateWindow.startDate,
+    endDate: dateWindow.endDate,
+    rangeLabel: dateWindow.rangeLabel,
   };
 }
 
@@ -364,7 +427,9 @@ function formatChanChartShortcutReply(params: {
   data: Record<string, unknown> | undefined;
 }) {
   const label = formatShortcutSecurityLabel(params.request, params.data);
-  return `${label} 今年以来 Chan 走势图已生成。\n\n${formatChanChartExplanation(params.data)}`;
+  return `${label} ${params.request.rangeLabel} Chan 走势图已生成。\n\n${formatChanChartExplanation(
+    params.data,
+  )}`;
 }
 
 function formatRemoteToolError(payload: { error?: { code?: string; message?: string } }) {

@@ -26,6 +26,7 @@ function createApi(): OpenClawPluginApi {
 describe("Pattern Strategy Chan chart shortcut", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it("parses year-to-date Chan chart requests", () => {
@@ -38,6 +39,7 @@ describe("Pattern Strategy Chan chart shortcut", () => {
       securityName: "东方电气",
       startDate: "2026-01-01",
       endDate: "2026-06-12",
+      rangeLabel: "今年以来",
     });
     expect(
       resolveChanChartShortcutRequest(
@@ -48,6 +50,7 @@ describe("Pattern Strategy Chan chart shortcut", () => {
       symbol: "600875",
       startDate: "2026-01-01",
       endDate: "2026-06-12",
+      rangeLabel: "今年以来",
     });
     expect(
       resolveChanChartShortcutRequest(
@@ -58,11 +61,39 @@ describe("Pattern Strategy Chan chart shortcut", () => {
       securityName: "凤凰航运",
       startDate: "2026-01-01",
       endDate: "2026-06-12",
+      rangeLabel: "今年以来",
     });
     expect(resolveChanChartShortcutRequest("东方电气走势怎么看")).toBeUndefined();
   });
 
+  it("parses recent half-year Chan chart requests", () => {
+    expect(
+      resolveChanChartShortcutRequest(
+        "给我一下最近半年，特宝生物的chan图",
+        new Date("2026-06-30T02:47:00.000Z"),
+      ),
+    ).toEqual({
+      securityName: "特宝生物",
+      startDate: "2025-12-30",
+      endDate: "2026-06-30",
+      rangeLabel: "最近半年（2025-12-30 至 2026-06-30）",
+    });
+    expect(
+      resolveChanChartShortcutRequest(
+        "请给我下688278近6个月的chan图",
+        new Date("2026-06-30T02:47:00.000Z"),
+      ),
+    ).toMatchObject({
+      symbol: "688278",
+      startDate: "2025-12-30",
+      endDate: "2026-06-30",
+      rangeLabel: "最近半年（2025-12-30 至 2026-06-30）",
+    });
+  });
+
   it("handles clear Chan chart requests before model dispatch", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-12T04:55:00.000Z"));
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
@@ -146,6 +177,75 @@ describe("Pattern Strategy Chan chart shortcut", () => {
     expect(result?.reply?.text).toContain("最近底分型 14.16（2026-05-27）");
     expect(result?.reply?.text).toContain("最新收盘约 15.2 元");
     expect(result?.reply?.text).toContain("本次检测到 2 个结构信号");
+  });
+
+  it("handles recent half-year Chan chart requests before model dispatch", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-30T02:47:00.000Z"));
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            tool_name: "chan.generate_chart",
+            data: {
+              symbol: "688278.SH",
+              security_name: "特宝生物",
+              chart_url: "/api/strategies/chart?path=charts/688278.png",
+              chart_path: "charts/688278.png",
+            },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(Buffer.from("png"), {
+          headers: {
+            "content-type": "image/png",
+          },
+        }),
+      );
+    const api = createApi();
+    const event = {
+      content: "给我一下最近半年，特宝生物的chan图",
+      channel: "feishu",
+      sessionKey: "agent:tas-dispatch:feishu:direct:ou_user",
+    } as PluginHookBeforeDispatchEvent;
+
+    const result = await handleChanChartBeforeDispatch(api, event, {
+      channelId: "feishu",
+    } as PluginHookBeforeDispatchContext);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://pattern-strategy.local/tools/chan.generate_chart/invoke",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          arguments: {
+            security_name: "特宝生物",
+            start_date: "2025-12-30",
+            end_date: "2026-06-30",
+            use_price_cache: true,
+          },
+          context: {
+            source: "openclaw_agent",
+          },
+        }),
+      }),
+    );
+    expect(result).toMatchObject({
+      handled: true,
+      reply: {
+        text: expect.stringContaining(
+          "特宝生物（688278.SH） 最近半年（2025-12-30 至 2026-06-30） Chan 走势图已生成。",
+        ),
+        mediaUrl: expect.stringContaining("688278.png"),
+        mediaUrls: [expect.stringContaining("688278.png")],
+        trustedLocalMedia: true,
+        channelData: { feishu: { mediaFirst: true } },
+      },
+    });
   });
 
   it("falls through when the remote chart request fails", async () => {

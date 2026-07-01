@@ -582,6 +582,42 @@ describe("Pattern Strategy async watch notifications", () => {
     });
   });
 
+  it("recovers structured CANSLIM enrichment embedded in an overall summary field", () => {
+    const summary = __testing.extractModelSignalSummary([
+      {
+        text: JSON.stringify({
+          overall_analysis: JSON.stringify({
+            overall_ranking: "综合排序：万顺新材第一，浙江众成第二。",
+            signal_enrichment: [
+              {
+                symbol: "300057.SZ",
+                rank: 1,
+                ranking_reason: "盈利加速叠加产业量产拐点，排序第一。",
+                data_support: "2026Q1 净利润同比 +430%，融资余额近一月增长 25%。",
+                financial_growth: "2026Q1 营收同比 +16%，净利润同比 +430%。",
+                institution_holder_change: "机构持仓证据不足，列为缺口。",
+                margin_balance_change: "融资余额近一月增长 25% 至 4.82 亿元。",
+                sentiment_heat: "产业量产和客户验证带来热度。",
+                information_gaps: "缺少最新机构连续增持证据。",
+                trading_principles: "不追高，等待量价延续确认。",
+              },
+            ],
+          }),
+        }),
+      },
+    ]);
+
+    expect(summary.overallAnalysis).toBe("万顺新材第一，浙江众成第二。");
+    expect(summary.signalEnrichment).toHaveLength(1);
+    expect(summary.signalEnrichment[0]).toMatchObject({
+      symbol: "300057.SZ",
+      rank: "第1位",
+      rankingReason: "盈利加速叠加产业量产拐点，排序第一。",
+      dataSupport: "2026Q1 净利润同比 +430%，融资余额近一月增长 25%。",
+      marginBalanceChange: "融资余额近一月增长 25% 至 4.82 亿元。",
+    });
+  });
+
   it("builds standardized Feishu signal summary cards for actionable callback delivery", () => {
     const payload = __testing.buildStrategySignalSummaryPayload({
       watch: createWatch("strategy.strong_pivot_breakout.daily_scan"),

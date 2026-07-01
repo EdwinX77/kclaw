@@ -89,6 +89,13 @@ const ENRICHMENT_SECTION_SPECS = [
   { key: "informationGaps", label: "信息缺口" },
   { key: "tradingPrinciples", label: "交易原则检查" },
 ] as const;
+const OVERALL_ANALYSIS_KEYS = [
+  "overall_ranking",
+  "overallRanking",
+  "overall_analysis",
+  "overallAnalysis",
+  "ranking_result",
+] as const;
 const activeStrategyWatchJobs = new Set<string>();
 const activeIndiceWatchJobs = new Set<string>();
 
@@ -1041,24 +1048,53 @@ function extractStructuredSignalEnrichment(root: Record<string, unknown>) {
     .filter((entry): entry is SignalEnrichmentSummary => Boolean(entry));
 }
 
+function extractOverallAnalysis(root: Record<string, unknown>) {
+  return (
+    normalizeAnalysisText(readNestedString(root, [...OVERALL_ANALYSIS_KEYS])) ??
+    DEFAULT_OVERALL_ANALYSIS
+  );
+}
+
+function extractEmbeddedStructuredModelSummary(
+  root: Record<string, unknown>,
+): ModelSignalSummary | undefined {
+  for (const key of OVERALL_ANALYSIS_KEYS) {
+    const nestedText = readNestedString(root, [key]);
+    if (!nestedText) {
+      continue;
+    }
+    const nestedRoot = asRecord(extractJsonObject(nestedText));
+    if (!nestedRoot) {
+      continue;
+    }
+    const signalEnrichment = extractStructuredSignalEnrichment(nestedRoot);
+    if (signalEnrichment.length === 0) {
+      continue;
+    }
+    return {
+      overallAnalysis: extractOverallAnalysis(nestedRoot),
+      signalEnrichment,
+    };
+  }
+  return undefined;
+}
+
 function parseStructuredModelSummary(text: string): ModelSignalSummary | undefined {
   const parsed = extractJsonObject(text);
   const root = asRecord(parsed);
   if (!root) {
     return undefined;
   }
+  const signalEnrichment = extractStructuredSignalEnrichment(root);
+  if (signalEnrichment.length === 0) {
+    const embedded = extractEmbeddedStructuredModelSummary(root);
+    if (embedded) {
+      return embedded;
+    }
+  }
   return {
-    overallAnalysis:
-      normalizeAnalysisText(
-        readNestedString(root, [
-          "overall_ranking",
-          "overallRanking",
-          "overall_analysis",
-          "overallAnalysis",
-          "ranking_result",
-        ]),
-      ) ?? DEFAULT_OVERALL_ANALYSIS,
-    signalEnrichment: extractStructuredSignalEnrichment(root),
+    overallAnalysis: extractOverallAnalysis(root),
+    signalEnrichment,
   };
 }
 
