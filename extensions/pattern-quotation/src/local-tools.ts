@@ -11,6 +11,7 @@ import {
   type QuotationRefreshAsyncWatch,
   upsertAsyncWatch,
 } from "./async-watch-store.js";
+import { readMarketDate } from "./quotation-identity.js";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: "object",
@@ -186,6 +187,10 @@ function readString(params: Record<string, unknown>, key: string) {
   return typeof value === "string" ? value.trim() : undefined;
 }
 
+function isCronSession(ctx: OpenClawPluginToolContext) {
+  return /(?:^|:)cron:/.test(ctx.sessionKey?.trim() ?? "");
+}
+
 const localToolDefs: LocalToolDef[] = [
   {
     name: "quotation_watch_refresh",
@@ -232,6 +237,21 @@ const localToolDefs: LocalToolDef[] = [
         typeof params.wake_mode === "string" && params.wake_mode.trim() === "next-heartbeat"
           ? ("next-heartbeat" as AsyncCompletionWakeMode)
           : ("now" as AsyncCompletionWakeMode);
+      const cronWatch = isCronSession(ctx) || readString(params, "source") === "openclaw_cron";
+      const source = readString(params, "source") ?? (cronWatch ? "openclaw_cron" : undefined);
+      const requestKey = readString(params, "request_key");
+      const refreshDate = readMarketDate(params.refresh_date);
+      if (params.refresh_date !== undefined && !refreshDate) {
+        throw new Error("quotation_watch_refresh refresh_date must be YYYY-MM-DD");
+      }
+      if (cronWatch && (!requestKey || !refreshDate)) {
+        throw new Error(
+          "quotation_watch_refresh requires the backend-returned request_key and refresh_date for cron jobs",
+        );
+      }
+      if (cronWatch && !requestKey?.endsWith(`:${refreshDate?.replaceAll("-", "")}`)) {
+        throw new Error("quotation_watch_refresh request_key does not match refresh_date");
+      }
       const now = Date.now();
       const watch: QuotationRefreshAsyncWatch = {
         kind: "quotation_refresh",
@@ -240,10 +260,10 @@ const localToolDefs: LocalToolDef[] = [
         agentId,
         wakeMode,
         followupMode: "heartbeat-system-event",
-        source: readString(params, "source"),
-        requestKey: readString(params, "request_key"),
+        source,
+        requestKey,
         runLabel: readString(params, "run_label"),
-        refreshDate: readString(params, "refresh_date"),
+        refreshDate,
         registeredAt: now,
         updatedAt: now,
       };

@@ -7,6 +7,7 @@ import {
   updateAsyncWatch,
 } from "./async-watch-store.js";
 import { formatPatternQuotationResult, invokePatternQuotationTool } from "./client.js";
+import { buildQuotationIdempotencyKey, isRecord, readMarketDate } from "./quotation-identity.js";
 
 type PatternQuotationPluginConfig = {
   baseUrl?: string;
@@ -375,6 +376,68 @@ async function fetchQuotationErrors(params: {
   return Array.isArray(data) ? data : [];
 }
 
+function readStringField(data: Record<string, unknown> | null, key: string) {
+  const value = data?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function deriveCronQuotationRequestKey(runData: Record<string, unknown> | null) {
+  const startDate = readMarketDate(runData?.start_date);
+  const endDate = readMarketDate(runData?.end_date);
+  const chainKey = readStringField(runData, "chain_key");
+  if (!startDate || !endDate || !chainKey) {
+    return undefined;
+  }
+  const stages = Array.isArray(runData?.stages)
+    ? runData.stages.filter(
+        (stage): stage is string => typeof stage === "string" && Boolean(stage.trim()),
+      )
+    : undefined;
+  return buildQuotationIdempotencyKey({ startDate, endDate, chainKey, stages });
+}
+
+function findQuotationWatchIdentityMismatch(params: {
+  watch: QuotationRefreshAsyncWatch;
+  runData: Record<string, unknown> | null;
+}) {
+  if (!isRecord(params.runData)) {
+    return "quotation.refresh_get returned no job data";
+  }
+  const remoteJobId = readStringField(params.runData, "job_id");
+  if (remoteJobId !== params.watch.jobId) {
+    return `job_id expected ${params.watch.jobId}, received ${remoteJobId ?? "missing"}`;
+  }
+  if (params.watch.refreshDate) {
+    const expectedDate = readMarketDate(params.watch.refreshDate);
+    const remoteStartDate = readMarketDate(params.runData.start_date);
+    const remoteEndDate = readMarketDate(params.runData.end_date);
+    if (!expectedDate || !remoteEndDate) {
+      return "refresh_date identity is missing or invalid";
+    }
+    if (remoteEndDate !== expectedDate) {
+      return `end_date expected ${expectedDate}, received ${remoteEndDate}`;
+    }
+    if (params.watch.source === "openclaw_cron" && remoteStartDate !== expectedDate) {
+      return `start_date expected ${expectedDate}, received ${remoteStartDate ?? "missing"}`;
+    }
+  }
+  if (params.watch.requestKey) {
+    const remoteRequestKey =
+      readStringField(params.runData, "idempotency_key") ??
+      readStringField(params.runData, "request_key") ??
+      (params.watch.source === "openclaw_cron"
+        ? deriveCronQuotationRequestKey(params.runData)
+        : undefined);
+    if (remoteRequestKey && remoteRequestKey !== params.watch.requestKey) {
+      return `request_key expected ${params.watch.requestKey}, received ${remoteRequestKey}`;
+    }
+    if (params.watch.source === "openclaw_cron" && !remoteRequestKey) {
+      return "request_key identity is missing";
+    }
+  }
+  return undefined;
+}
+
 export const __testing = {
   buildQuotationTerminalNotification,
   processQuotationWatch,
@@ -389,6 +452,35 @@ async function processQuotationWatch(params: {
     pluginConfig: params.api.pluginConfig as PatternQuotationPluginConfig | undefined,
     jobId: params.watch.jobId,
   });
+  const identityMismatch = findQuotationWatchIdentityMismatch({ watch: params.watch, runData });
+  if (identityMismatch) {
+    const now = Date.now();
+    const error = `quotation watch identity mismatch: ${identityMismatch}`;
+    await appendAuditRecord(params.api, {
+      kind: "async_watch_failed",
+      requesterSessionKey: params.watch.sessionKey,
+      sessionKey: params.watch.sessionKey,
+      agentId: params.watch.agentId,
+      jobId: params.watch.jobId,
+      status: "identity_mismatch",
+      summary: "quotation async watch rejected mismatched job identity",
+      data: {
+        source: params.watch.source,
+        requestKey: params.watch.requestKey,
+        refreshDate: params.watch.refreshDate,
+        error,
+      },
+    });
+    await updateAsyncWatch(params.stateDir, params.watch.jobId, (existing) => ({
+      ...existing,
+      lastRemoteStatus: "identity_mismatch",
+      deliveryStatus: "not-requested",
+      lastError: error,
+      updatedAt: now,
+      completedAt: now,
+    }));
+    return;
+  }
   const remoteStatus = normalizeStatus(runData?.status);
   if (!QUOTATION_TERMINAL_STATUSES.has(remoteStatus)) {
     await appendAuditRecord(params.api, {

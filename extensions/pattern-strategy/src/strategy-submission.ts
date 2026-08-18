@@ -28,12 +28,6 @@ export type StrategyTaskRunSubmission = {
   marketDate?: MarketDateText;
 };
 
-const CRON_TASK_ALIASES: Record<string, string> = {
-  "strategy.mid_term_accel.daily_scan": "mid-term-accel",
-  "strategy.mid_term_reversal_opt.daily_scan": "mid-term-reversal-opt",
-  "strategy.strong_pivot_breakout.daily_scan": "strong-pivot-breakout",
-};
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -116,9 +110,9 @@ function extractCronIdempotencyParts(value: unknown) {
 }
 
 function resolveCronStrategyAlias(params: { taskKey?: string; idempotencyKey?: string }) {
-  const mapped = params.taskKey ? CRON_TASK_ALIASES[params.taskKey] : undefined;
-  if (mapped) {
-    return mapped;
+  const taskAlias = /^strategy\.([a-z0-9_]+)\.daily_scan$/.exec(params.taskKey ?? "")?.[1];
+  if (taskAlias) {
+    return taskAlias.replaceAll("_", "-");
   }
   return extractCronIdempotencyParts(params.idempotencyKey)?.alias;
 }
@@ -133,97 +127,46 @@ function normalizeCronTraceId(value: string, marketDate: MarketDateText) {
     : value;
 }
 
-function replaceCronRequestKeyDate(params: {
-  requestKey?: string;
-  oldIdempotencyKey: string;
-  newIdempotencyKey: string;
-}) {
-  if (!params.requestKey?.trim()) {
-    return params.newIdempotencyKey;
-  }
-  const requestKey = params.requestKey.trim();
-  if (requestKey === params.oldIdempotencyKey) {
-    return params.newIdempotencyKey;
-  }
-  if (requestKey.endsWith(`:${params.oldIdempotencyKey}`)) {
-    return `${requestKey.slice(0, -params.oldIdempotencyKey.length)}${params.newIdempotencyKey}`;
-  }
-  return requestKey;
-}
-
 export function normalizeCronStrategyTaskRunParams(
   params: Record<string, unknown>,
   marketDate: MarketDateText,
+  context: { cronJobId?: string } = {},
 ) {
-  const submission = validateStrategyTaskRunSubmission(params);
-  if (submission.triggerType !== "cron") {
-    return { params, submission, changed: false };
-  }
+  const taskKey = readRequiredString(params, "task_key");
+  const previousIdempotencyKey = readString(params, "idempotency_key");
   const alias = resolveCronStrategyAlias({
-    taskKey: submission.taskKey,
-    idempotencyKey: submission.idempotencyKey,
+    taskKey,
+    idempotencyKey: previousIdempotencyKey,
   });
   if (!alias) {
     throw new Error("strategy_task_run cron submissions require a strategy alias");
   }
   const idempotencyKey = buildCronIdempotencyKey(alias, marketDate);
-  const traceId = normalizeCronTraceId(submission.traceId, marketDate);
+  const previousTraceId = readString(params, "trace_id");
+  const cronJobId = context.cronJobId?.trim();
+  const traceId = cronJobId
+    ? `cron:${cronJobId}:${marketDate}`
+    : previousTraceId
+      ? normalizeCronTraceId(previousTraceId, marketDate)
+      : `cron:${alias}:${marketDate}`;
   const normalizedParams = {
     ...params,
     idempotency_key: idempotencyKey,
+    source: "openclaw_cron",
+    requested_by: "openclaw_gateway",
     trace_id: traceId,
+    trigger_type: "cron",
   };
+  const submission = validateStrategyTaskRunSubmission(normalizedParams);
   return {
     params: normalizedParams,
-    submission: validateStrategyTaskRunSubmission(normalizedParams),
-    changed: idempotencyKey !== submission.idempotencyKey || traceId !== submission.traceId,
-  };
-}
-
-export function normalizeCronStrategyWatchParams(
-  params: Record<string, unknown>,
-  marketDate: MarketDateText,
-) {
-  const triggerType = readString(params, "trigger_type");
-  if (triggerType !== "cron") {
-    return { params, changed: false };
-  }
-  const idempotencyKey = readString(params, "idempotency_key") ?? readString(params, "request_key");
-  if (!idempotencyKey) {
-    return { params, changed: false };
-  }
-  const idempotency = extractCronIdempotencyParts(idempotencyKey);
-  if (!idempotency) {
-    throw new Error(
-      "strategy_watch_run cron submissions require idempotency_key=cron-{strategy-alias}-{yyyy-mm-dd}",
-    );
-  }
-  const alias = resolveCronStrategyAlias({
-    taskKey: readString(params, "task_key"),
-    idempotencyKey,
-  });
-  if (!alias) {
-    throw new Error("strategy_watch_run cron submissions require a strategy alias");
-  }
-  const normalizedIdempotencyKey = buildCronIdempotencyKey(alias, marketDate);
-  const traceId = readString(params, "trace_id");
-  const requestKey = replaceCronRequestKeyDate({
-    requestKey: readString(params, "request_key"),
-    oldIdempotencyKey: idempotency.full,
-    newIdempotencyKey: normalizedIdempotencyKey,
-  });
-  const normalizedParams = {
-    ...params,
-    idempotency_key: normalizedIdempotencyKey,
-    request_key: requestKey,
-    ...(traceId ? { trace_id: normalizeCronTraceId(traceId, marketDate) } : {}),
-  };
-  return {
-    params: normalizedParams,
+    submission,
     changed:
-      normalizedIdempotencyKey !== idempotency.full ||
-      requestKey !== readString(params, "request_key") ||
-      normalizedParams.trace_id !== params.trace_id,
+      idempotencyKey !== previousIdempotencyKey ||
+      normalizedParams.source !== params.source ||
+      normalizedParams.requested_by !== params.requested_by ||
+      traceId !== previousTraceId ||
+      normalizedParams.trigger_type !== params.trigger_type,
   };
 }
 

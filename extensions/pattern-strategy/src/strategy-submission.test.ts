@@ -3,7 +3,6 @@ import {
   findActiveStrategyWatch,
   isStrategyTerminalStatus,
   normalizeCronStrategyTaskRunParams,
-  normalizeCronStrategyWatchParams,
   validateStrategyTaskRunSubmission,
 } from "./strategy-submission.js";
 
@@ -57,7 +56,7 @@ describe("Pattern Strategy submission policy", () => {
     expect(isStrategyTerminalStatus("running")).toBe(false);
   });
 
-  it("normalizes cron task and watcher keys to the backend trade date", () => {
+  it("normalizes cron task keys to the backend trade date", () => {
     const taskRun = normalizeCronStrategyTaskRunParams(
       {
         task_key: "strategy.strong_pivot_breakout.daily_scan",
@@ -75,24 +74,43 @@ describe("Pattern Strategy submission policy", () => {
       trace_id: "cron:strong-pivot:2026-06-15",
     });
     expect(taskRun.submission.marketDate).toBe("2026-06-15");
+  });
 
-    expect(
-      normalizeCronStrategyWatchParams(
-        {
-          task_key: "strategy.strong_pivot_breakout.daily_scan",
-          idempotency_key: "cron-strong-pivot-breakout-2026-06-12",
-          request_key:
-            "strategy.strong_pivot_breakout.daily_scan:cron-strong-pivot-breakout-2026-06-12",
-          trace_id: "cron:strong-pivot:2026-06-12",
-          trigger_type: "cron",
-        },
-        "2026-06-15",
-      ).params,
-    ).toMatchObject({
-      idempotency_key: "cron-strong-pivot-breakout-2026-06-15",
-      request_key:
-        "strategy.strong_pivot_breakout.daily_scan:cron-strong-pivot-breakout-2026-06-15",
-      trace_id: "cron:strong-pivot:2026-06-15",
+  it.each([
+    ["strategy.bolling_uptrend.daily_scan", "cron-bolling-uptrend-2026-06-15"],
+    ["strategy.long_term_accel.daily_scan", "cron-long-term-accel-2026-06-15"],
+    ["strategy.future_signal_family.daily_scan", "cron-future-signal-family-2026-06-15"],
+  ])("derives a future-safe cron alias for %s", (taskKey, expectedKey) => {
+    const taskRun = normalizeCronStrategyTaskRunParams({ task_key: taskKey }, "2026-06-15");
+    expect(taskRun.params.idempotency_key).toBe(expectedKey);
+  });
+
+  it("generates cron metadata before validating stale or missing model fields", () => {
+    const taskRun = normalizeCronStrategyTaskRunParams(
+      {
+        task_key: "strategy.mid_term_accel.daily_scan",
+        idempotency_key: "stale-model-key",
+        source: "model_override",
+      },
+      "2026-06-15",
+      { cronJobId: "mid-term-accel-daily" },
+    );
+
+    expect(taskRun.params).toMatchObject({
+      task_key: "strategy.mid_term_accel.daily_scan",
+      idempotency_key: "cron-mid-term-accel-2026-06-15",
+      source: "openclaw_cron",
+      requested_by: "openclaw_gateway",
+      trace_id: "cron:mid-term-accel-daily:2026-06-15",
+      trigger_type: "cron",
+    });
+    expect(taskRun.submission).toMatchObject({
+      idempotencyKey: "cron-mid-term-accel-2026-06-15",
+      marketDate: "2026-06-15",
+      source: "openclaw_cron",
+      requestedBy: "openclaw_gateway",
+      traceId: "cron:mid-term-accel-daily:2026-06-15",
+      triggerType: "cron",
     });
   });
 

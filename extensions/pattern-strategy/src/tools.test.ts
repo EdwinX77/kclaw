@@ -35,7 +35,7 @@ function createApi(
   } as unknown as OpenClawPluginApi;
 }
 
-function latestTradeDateResponse(tradeDate = "2026-05-29") {
+function latestTradeDateResponse(tradeDate = "2026-05-29", dataReady = true) {
   return new Response(
     JSON.stringify({
       ok: true,
@@ -43,7 +43,7 @@ function latestTradeDateResponse(tradeDate = "2026-05-29") {
       data: {
         trade_date: tradeDate,
         is_trading_day: true,
-        data_ready: true,
+        data_ready: dataReady,
         previous_trade_date: "2026-05-28",
         source: "market_calendar",
       },
@@ -67,6 +67,7 @@ function expectLatestTradeDateCall(fetchMock: ReturnType<typeof vi.spyOn>, callI
 
 describe("Pattern Strategy remote tools", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     return Promise.all(
       tempDirs.splice(0).map(async (dir) => await fs.rm(dir, { recursive: true, force: true })),
@@ -86,6 +87,8 @@ describe("Pattern Strategy remote tools", () => {
             data: {
               job_id: "run-1",
               status: "accepted",
+              request_key: "strategy.mid_term_accel.daily_scan:cron-mid-term-accel-2026-05-29",
+              resolved_window: { start_date: "2026-03-01", end_date: "2026-05-29" },
             },
           }),
         ),
@@ -120,7 +123,7 @@ describe("Pattern Strategy remote tools", () => {
             idempotency_key: "cron-mid-term-accel-2026-05-29",
             source: "openclaw_cron",
             requested_by: "openclaw_gateway",
-            trace_id: "trace-cron-1",
+            trace_id: "cron:job-1:2026-05-29",
             trigger_type: "cron",
             overrides: { selection: { limit: 7000 } },
           },
@@ -140,10 +143,132 @@ describe("Pattern Strategy remote tools", () => {
       idempotency_key: "cron-mid-term-accel-2026-05-29",
       source: "openclaw_cron",
       requested_by: "openclaw_gateway",
-      trace_id: "trace-cron-1",
+      trace_id: "cron:job-1:2026-05-29",
       trigger_type: "cron",
       returned_job_id: "run-1",
       returned_status: "accepted",
+    });
+  });
+
+  it("submits cron strategy tasks when market data_ready is false", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(latestTradeDateResponse("2026-08-07", false))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            tool_name: "strategy.task_run",
+            data: {
+              job_id: "run-data-not-ready",
+              status: "accepted",
+              request_key: "strategy.mid_term_accel.daily_scan:cron-mid-term-accel-2026-08-07",
+              resolved_window: { start_date: "2026-05-01", end_date: "2026-08-07" },
+            },
+          }),
+        ),
+      );
+    const ctx = {
+      agentId: "tas-dispatch",
+      sessionKey: "agent:tas-dispatch:cron:mid-term-accel:run:run-1",
+    };
+    const tool = createPatternStrategyTools(
+      createApi({ stateDir: await makeTempStateDir() }),
+      ctx as OpenClawPluginToolContext,
+    ).find((candidate) => candidate.name === "strategy_task_run");
+    if (!tool) {
+      throw new Error("missing strategy_task_run");
+    }
+
+    const result = await tool.execute("call-data-not-ready", {
+      task_key: "strategy.mid_term_accel.daily_scan",
+      overrides: { selection: { limit: 7000 } },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expectLatestTradeDateCall(fetchMock);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "http://pattern-strategy.local/tools/strategy.task_run/invoke",
+    );
+    const submissionBody = JSON.parse(
+      String((fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.body ?? "{}"),
+    );
+    expect(submissionBody.arguments).toMatchObject({
+      task_key: "strategy.mid_term_accel.daily_scan",
+      idempotency_key: "cron-mid-term-accel-2026-08-07",
+      source: "openclaw_cron",
+      requested_by: "openclaw_gateway",
+      trace_id: "cron:mid-term-accel:2026-08-07",
+      trigger_type: "cron",
+    });
+    const parsed = JSON.parse(result.content[0]!.text);
+    expect(parsed.data).toMatchObject({
+      job_id: "run-data-not-ready",
+      idempotency_key: "cron-mid-term-accel-2026-08-07",
+      market_date: "2026-08-07",
+    });
+  });
+
+  it("generates cron submission metadata before validating model-supplied fields", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-14T21:10:00.000Z"));
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(latestTradeDateResponse("2026-06-12"))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            tool_name: "strategy.task_run",
+            data: {
+              job_id: "run-generated-metadata",
+              status: "accepted",
+              request_key: "strategy.mid_term_accel.daily_scan:cron-mid-term-accel-2026-06-11",
+              resolved_window: { start_date: "2026-03-14", end_date: "2026-06-11" },
+            },
+          }),
+        ),
+      );
+    const ctx = {
+      agentId: "tas-dispatch",
+      sessionKey: "agent:tas-dispatch:cron:cron-job-generated:run:run-1",
+    };
+    const tool = createPatternStrategyTools(
+      createApi({ stateDir: await makeTempStateDir() }),
+      ctx as OpenClawPluginToolContext,
+    ).find((candidate) => candidate.name === "strategy_task_run");
+    if (!tool) {
+      throw new Error("missing strategy_task_run");
+    }
+
+    const result = await tool.execute("call-generated-metadata", {
+      task_key: "strategy.mid_term_accel.daily_scan",
+      idempotency_key: "stale-model-key",
+      source: "model_override",
+      overrides: { selection: { limit: 7000 } },
+    });
+
+    const calendarBody = JSON.parse(
+      String((fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body ?? "{}"),
+    );
+    expect(calendarBody.arguments.as_of).toBe("2026-06-15T05:10:00+08:00");
+    const submissionBody = JSON.parse(
+      String((fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.body ?? "{}"),
+    );
+    expect(submissionBody.arguments).toMatchObject({
+      task_key: "strategy.mid_term_accel.daily_scan",
+      idempotency_key: "cron-mid-term-accel-2026-06-12",
+      source: "openclaw_cron",
+      requested_by: "openclaw_gateway",
+      trace_id: "cron:cron-job-generated:2026-06-12",
+      trigger_type: "cron",
+    });
+    const parsed = JSON.parse(result.content[0]!.text);
+    expect(parsed.data).toMatchObject({
+      request_key: "strategy.mid_term_accel.daily_scan:cron-mid-term-accel-2026-06-11",
+      idempotency_key: "cron-mid-term-accel-2026-06-11",
+      resolved_window: { start_date: "2026-03-14", end_date: "2026-06-11" },
+      market_date: "2026-06-11",
     });
   });
 
@@ -156,6 +281,8 @@ describe("Pattern Strategy remote tools", () => {
           data: {
             job_id: "manual-group-run-1",
             status: "queued",
+            request_key: "strategy.mid_term_accel.daily_scan:manual-mid-term-accel-2026-06-23-om_1",
+            resolved_window: { start_date: "2026-04-01", end_date: "2026-06-23" },
           },
         }),
       ),
@@ -337,6 +464,9 @@ describe("Pattern Strategy remote tools", () => {
             data: {
               job_id: "run-strong-pivot",
               status: "accepted",
+              request_key:
+                "strategy.strong_pivot_breakout.daily_scan:cron-strong-pivot-breakout-2026-06-15",
+              resolved_window: { start_date: "2026-04-01", end_date: "2026-06-15" },
             },
           }),
         ),
@@ -514,6 +644,9 @@ describe("Pattern Strategy remote tools", () => {
             data: {
               job_id: "fresh-run-1",
               status: "accepted",
+              request_key:
+                "strategy.strong_pivot_breakout.daily_scan:cron-strong-pivot-breakout-2026-05-29",
+              resolved_window: { start_date: "2026-03-01", end_date: "2026-05-29" },
             },
           }),
         ),
@@ -598,6 +731,8 @@ describe("Pattern Strategy remote tools", () => {
             data: {
               job_id: "cron-run-1",
               status: "accepted",
+              request_key: "strategy.mid_term_accel.daily_scan:cron-mid-term-accel-2026-05-29",
+              resolved_window: { start_date: "2026-03-01", end_date: "2026-05-29" },
             },
           }),
         ),
@@ -749,6 +884,10 @@ describe("Pattern Strategy remote tools", () => {
             job_id: "indice-job-1",
             status: "running",
             stage: "turnover",
+            start_date: "2026-05-01",
+            end_date: "2026-08-06",
+            idempotency_key: "indice-daily-20260806",
+            source: "openclaw_cron",
           },
         }),
       ),
@@ -777,13 +916,10 @@ describe("Pattern Strategy remote tools", () => {
         method: "POST",
         body: JSON.stringify({
           arguments: {
-            start_date: "2026-02-25",
-            end_date: "2026-05-25",
             dimensions: ["industry", "size", "style", "concept"],
             refresh_turnover: true,
             force_universe: false,
             source: "openclaw_cron",
-            idempotency_key: "indice-daily-20260525",
           },
           context: {
             source: "openclaw_agent",
@@ -796,6 +932,10 @@ describe("Pattern Strategy remote tools", () => {
       job_id: "indice-job-1",
       status: "running",
       stage: "turnover",
+      start_date: "2026-05-01",
+      end_date: "2026-08-06",
+      idempotency_key: "indice-daily-20260806",
+      source: "openclaw_cron",
     });
   });
 });

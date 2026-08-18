@@ -151,6 +151,8 @@
 
   agents: {
     defaults: {
+      userTimezone: "Asia/Shanghai",
+      envelopeTimezone: "user",
       model: {
         primary: "deepseek/deepseek-v4-pro",
       },
@@ -316,7 +318,13 @@
     },
     agentToAgent: {
       enabled: true,
-      allow: ["pattern-strategy", "pattern-quotation", "market-research", "market-memory", "ops-guard"],
+      allow: [
+        "pattern-strategy",
+        "pattern-quotation",
+        "market-research",
+        "market-memory",
+        "ops-guard",
+      ],
     },
     sessions: {
       visibility: "all",

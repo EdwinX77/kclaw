@@ -14,6 +14,8 @@ import {
   type PatternStrategyAsyncWatch,
 } from "./async-watch-store.js";
 import { listAutomationRuns, recordAutomationRun } from "./automation-run-store.js";
+import { getIndiceAsyncWatch, upsertIndiceAsyncWatch } from "./indice-watch-store.js";
+import type { IndiceRefreshAsyncWatch } from "./indice-watch-store.js";
 
 const tempDirs: string[] = [];
 const originalStateDir = process.env.OPENCLAW_STATE_DIR;
@@ -71,6 +73,54 @@ afterEach(async () => {
 });
 
 describe("Pattern Strategy async watch notifications", () => {
+  it("rejects a board-index job whose backend dates do not match the registered identity", async () => {
+    const stateDir = await makeTempDir();
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    const watch: IndiceRefreshAsyncWatch = {
+      kind: "indice_refresh",
+      jobId: "indice_job_1",
+      sessionKey: "agent:pattern-strategy:cron:board-index",
+      agentId: "pattern-strategy",
+      wakeMode: "now",
+      source: "openclaw_cron",
+      requestKey: "indice-daily-20260525",
+      startDate: "2026-02-25",
+      refreshDate: "2026-05-25",
+      registeredAt: 1,
+      updatedAt: 1,
+    };
+    await upsertIndiceAsyncWatch({ stateDir, watch });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ok: true,
+              tool_name: "indice.refresh_get",
+              data: {
+                job_id: watch.jobId,
+                status: "completed",
+                start_date: "2026-02-24",
+                end_date: "2026-05-24",
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+
+    await __testing.processIndiceWatch({ api: createApi(stateDir), stateDir, watch });
+
+    const updated = await getIndiceAsyncWatch({ stateDir, jobId: watch.jobId });
+    expect(updated).toMatchObject({
+      lastRemoteStatus: "identity_mismatch",
+      deliveryStatus: "not-requested",
+      lastError: expect.stringContaining("start_date expected 2026-02-25"),
+    });
+    expect(updated?.completedAt).toEqual(expect.any(Number));
+  });
+
   it("reads async formatted run status for watcher polling", async () => {
     const fetchMock = vi.fn(
       async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {

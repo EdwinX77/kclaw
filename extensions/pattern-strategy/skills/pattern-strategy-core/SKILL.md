@@ -67,24 +67,26 @@ must not forward parameter-like fields to the user.
 3. If the user names a strategy loosely, by alias, or with a partial task name, call `strategy_task_list` first and resolve live candidate tasks from the returned templates.
 4. If the user did not provide an exact `task_key`, do not directly run anything. Return candidate tasks and require confirmation from the caller.
 5. Use `strategy_task_describe` only after you know which specific `task_key` is being considered or confirmed, and only for internal execution planning rather than user-facing detail disclosure.
-6. When running a task, call `strategy_task_run` as the shared Pattern Strategy queue entrypoint with stable queue metadata:
+6. When running a task, call `strategy_task_run` as the shared Pattern Strategy queue entrypoint.
+7. In a cron session, pass only the exact `task_key` and allowed `overrides`. Do not pass or calculate dates, `idempotency_key`, `source`, `requested_by`, `trace_id`, or `trigger_type`. Program code prepares the internal cron submission, while the Pattern backend's returned `request_key`, `idempotency_key`, and `resolved_window` are the authoritative identity and `Asia/Shanghai` business window.
+8. For non-cron submissions, pass stable queue metadata:
    - `idempotency_key`
    - `source`
    - `requested_by=openclaw_gateway`
    - `trace_id`
    - `trigger_type`
-7. Only pass override fields declared by the task template. Do not invent extra keys.
-8. Treat `strategy_task_run` as submission/queue admission only. Never assume the task completed from the submit response; call `strategy_get_run` for status.
-9. If the user wants result details, first call `strategy_get_run`; only call `strategy_get_signals` when the live status is exactly `succeeded`.
-10. When explaining returned signals, distinguish:
+9. Only pass override fields declared by the task template. Do not invent extra keys.
+10. Treat `strategy_task_run` as submission/queue admission only. Never assume the task completed from the submit response; call `strategy_get_run` for status.
+11. If the user wants result details, first call `strategy_get_run`; only call `strategy_get_signals` when the live status is exactly `succeeded`.
+12. When explaining returned signals, distinguish:
 
 - raw strategy execution: what the strategy run produced
 - signal delivery: how the current MCP delivery policy filtered those signals for this read
 
-11. Only call `strategy_cancel_run` when the user explicitly asks to stop a job. Do not cancel an old task to make room for a new scheduled or recovery run.
-12. `market_*` and `factor_*` tools are only auxiliary checks. They are not the formal strategy execution path.
-13. Use `factor_*` tools only after formal signals exist, or when the caller explicitly asks for factor context on symbols.
-14. When the user asks for a Chan chart, Chan theory chart, or trend structure chart for a security, call `chan_generate_chart`. Do not call old charting methods directly.
+13. Only call `strategy_cancel_run` when the user explicitly asks to stop a job. Do not cancel an old task to make room for a new scheduled or recovery run.
+14. `market_*` and `factor_*` tools are only auxiliary checks. They are not the formal strategy execution path.
+15. Use `factor_*` tools only after formal signals exist, or when the caller explicitly asks for factor context on symbols.
+16. When the user asks for a Chan chart, Chan theory chart, or trend structure chart for a security, call `chan_generate_chart`. Do not call old charting methods directly.
 
 ## Board index refresh
 
@@ -95,16 +97,15 @@ For the daily scheduled refresh:
 - call `indice_refresh_run` with `dimensions=["industry","size","style","concept"]`
 - set `refresh_turnover=true`
 - set `force_universe=false` unless explicitly instructed otherwise
-- set `source=openclaw_cron`
-- use `idempotency_key=indice-daily-YYYYMMDD`
-- use `start_date` and `end_date` in `YYYY-MM-DD` or `YYYYMMDD`
+- pass no dates, `source`, or `idempotency_key`; the cron bridge forces `source=openclaw_cron`, and the Pattern backend resolves the `Asia/Shanghai` business dates and canonical key
+- forward the exact returned `start_date`, `end_date`, and `idempotency_key` when registering the watcher; never recompute them in the command or model
 
 Terminal statuses are `completed`, `partial_failed`, and `failed`. Nonterminal statuses are `pending` and `running`. The stage values are `pending`, `universe`, `turnover`, `indices`, `completed`, and `failed`.
 
 After submission:
 
 1. Return `job_id` and the remote `message` immediately.
-2. If status is `pending` or `running`, call `indice_watch_refresh` so the final status can be delivered later.
+2. If status is `pending` or `running`, call `indice_watch_refresh` with the backend-returned identity so the final status can be delivered later.
 3. For cron jobs, prefer `indice_watch_refresh` over LLM polling. The watcher polls in code and sends the terminal result to the Feishu/chat delivery target captured from the cron session.
 4. Use `indice_refresh_get` for explicit progress checks or latest status checks.
 5. If `failed_indices > 0`, use `indice_refresh_errors` and include a compact failure preview.
@@ -184,8 +185,8 @@ When this agent is being used behind a front-door orchestrator, separate submiss
 
 1. submission turn
    - resolve candidates or confirm `task_key`
-   - call `strategy_task_run` with queue metadata
-   - register `strategy_watch_run` with the same `idempotency_key`, `source`, `requested_by`, `trace_id`, and `trigger_type` when a caller/session should receive completion
+   - in cron, call `strategy_task_run` with only `task_key` and allowed `overrides`; in non-cron flows, include the required queue metadata
+   - register `strategy_watch_run` with the exact `idempotency_key`, `source`, `requested_by`, `trace_id`, and `trigger_type` returned by submission when a caller/session should receive completion
    - return immediately with `job_id`
    - do not spend the first reply waiting for final signals
    - do not repeatedly call `strategy_get_run` from the LLM turn
@@ -202,15 +203,15 @@ The business `job_id` is the authoritative identifier. Do not substitute:
 
 ## Idempotency keys
 
-For scheduled Gateway-triggered strategy tasks, use these formats:
+For Gateway-triggered strategy tasks, the Pattern backend returns the authoritative key and `Asia/Shanghai` resolved window in these formats:
 
 - normal cron: `cron-{strategy-alias}-{yyyy-mm-dd}`
 - Gateway recovery after PI reports `timeout` or `failed`: `recovery-{strategy-alias}-{yyyy-mm-dd}-{attempt}`
 - manual request: stable request/message scoped key
 - explicit retry: stable retry scoped key
 
-For a normal cron repeat of the same task on the same market date, reuse exactly the same
-`idempotency_key`; PI returns the existing run. Do not use random keys for cron. Use
+For a normal cron repeat of the same task on the same market date, the Pattern backend returns exactly the same
+`idempotency_key` and the existing run. The bridge forwards that canonical identity, and the watcher validates it. The model must not construct, override, or randomize cron keys. Use
 `trigger_type=cron` for normal schedules, `trigger_type=gateway_recovery` for recovery,
 `trigger_type=manual` for explicit human runs, and `trigger_type=retry` only for explicit retries.
 

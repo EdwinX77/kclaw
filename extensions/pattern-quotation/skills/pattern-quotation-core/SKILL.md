@@ -32,7 +32,7 @@ Quotation refresh now uses configured task chains and explicit stages.
 - `pre_market`: 04:10 chain, stages `events`, `prices`, `financials`
 - `post_open`: 10:00 chain, stages `margin_trading`
 
-Cron runs execute the previous trading day's data on the current trading day. For example, a Friday trading-day cron normally refreshes Thursday's quotation data.
+Cron dates are owned by the Pattern backend. It applies each chain's business-date policy in `Asia/Shanghai` and returns the canonical window and idempotency key. For example, the 04:10 `pre_market` chain normally targets the previous trading day's data, while other chains may target the current Shanghai business date.
 
 Use `quotation_refresh_chain` with:
 
@@ -53,7 +53,7 @@ For Feishu/manual requests:
 1. Use `chain_key` when the request matches a configured chain.
 2. Use explicit `stages` only when the user asks to temporarily rerun specific stage data.
 3. Pass `start_date` and `end_date` when the user asks for a specific date or history window.
-4. If dates are omitted, the bridge defaults to the previous trading day in Asia/Shanghai.
+4. If dates are omitted, the Pattern backend applies the selected chain's `Asia/Shanghai` business-date policy.
 
 After submission:
 
@@ -67,21 +67,22 @@ After submission:
 
 ## Cron Workflow
 
-OpenClaw cron should run two isolated Pattern Quotation turns:
+OpenClaw cron should run two isolated Pattern Quotation turns. The model must pass only the configured `chain_key`; it must not pass or calculate `start_date`, `end_date`, `idempotency_key`, or `source`.
 
 ```text
-Run Pattern Quotation pre_market chain for the previous trading day. Call quotation_refresh_chain with chain_key=pre_market, return job_id/status/message, then register quotation_watch_refresh if the job is not terminal.
+Run Pattern Quotation pre_market chain. Call quotation_refresh_chain with chain_key=pre_market only, then register quotation_watch_refresh using the returned request_key and requested_end_date.
 ```
 
 ```text
-Run Pattern Quotation post_open chain for the previous trading day. Call quotation_refresh_chain with chain_key=post_open, return job_id/status/message, then register quotation_watch_refresh if the job is not terminal.
+Run Pattern Quotation post_open chain. Call quotation_refresh_chain with chain_key=post_open only, then register quotation_watch_refresh using the returned request_key and requested_end_date.
 ```
 
-Recommended idempotency keys:
+The Pattern backend returns canonical cron dates and idempotency keys according to the selected chain:
 
 - `quotation:pre_market:YYYYMMDD`
 - `quotation:post_open:YYYYMMDD`
-- `quotation:manual:<stage-or-chain>:YYYYMMDD`
+
+Never construct or override those cron keys in the prompt. The bridge exposes `requested_start_date`, `requested_end_date`, and `request_key` only from the backend's canonical response and rejects a stale response whose identity disagrees with the submitted job. For `quotation_watch_refresh`, forward the exact returned `request_key`, use the returned `requested_end_date` as `refresh_date`, and do not recompute either field. The watcher verifies the fetched job id, dates, and canonical key before delivering completion. Manual requests may still provide an explicit stable key together with an explicit date window when needed.
 
 Do not block the first cron or Feishu reply waiting for a long-running refresh to finish.
 

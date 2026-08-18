@@ -87,12 +87,7 @@ export function parseLatestAvailableTradeDateData(params: { data: unknown; asOf:
   if (!tradeDate) {
     throw new Error("market.latest_available_trade_date returned invalid trade_date");
   }
-  const dataReady = readBoolean(data, "data_ready");
-  if (dataReady !== true) {
-    throw new Error(
-      `market.latest_available_trade_date returned data_ready=false for ${tradeDate}`,
-    );
-  }
+  const dataReady = readBoolean(data, "data_ready") ?? false;
   return {
     tradeDate,
     isTradingDay: readBoolean(data, "is_trading_day") ?? false,

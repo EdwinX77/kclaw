@@ -54,22 +54,6 @@ function createApi(storePath: string): OpenClawPluginApi {
   } as unknown as OpenClawPluginApi;
 }
 
-function latestTradeDateResponse(tradeDate = "2026-05-29") {
-  return new Response(
-    JSON.stringify({
-      ok: true,
-      tool_name: "market.latest_available_trade_date",
-      data: {
-        trade_date: tradeDate,
-        is_trading_day: true,
-        data_ready: true,
-        previous_trade_date: "2026-05-28",
-        source: "market_calendar",
-      },
-    }),
-  );
-}
-
 describe("Pattern Strategy local watch tools", () => {
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pattern-strategy-tools-"));
@@ -123,7 +107,6 @@ describe("Pattern Strategy local watch tools", () => {
   });
 
   it("ignores bogus session keys and preserves enrichment for daily scans", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(latestTradeDateResponse());
     const sessionKey = "agent:tas-dispatch:cron:mid-term-accel";
     const storePath = await writeSessionStore(sessionKey);
     const ctx: OpenClawPluginToolContext = {
@@ -143,10 +126,12 @@ describe("Pattern Strategy local watch tools", () => {
       job_id: "claw_test",
       task_key: "strategy.mid_term_accel.daily_scan",
       idempotency_key: "cron-mid-term-accel-2026-05-29",
+      request_key: "strategy.mid_term_accel.daily_scan:cron-mid-term-accel-2026-05-29",
       source: "openclaw_cron",
       requested_by: "openclaw_gateway",
       trace_id: "trace-watch-1",
       trigger_type: "cron",
+      resolved_window: { start_date: "2026-05-29", end_date: "2026-05-29" },
       session_key: "ta_not_a_real_session",
       wake_mode: "next-heartbeat",
       enrich_signals: false,
@@ -171,8 +156,7 @@ describe("Pattern Strategy local watch tools", () => {
     expect(watch?.traceId).toBe("trace-watch-1");
   });
 
-  it("normalizes stale cron watch keys to the backend trade date", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(latestTradeDateResponse("2026-06-15"));
+  it("preserves backend-returned cron watch identity", async () => {
     const sessionKey = "agent:tas-dispatch:cron:strong-pivot";
     const storePath = await writeSessionStore(sessionKey);
     const ctx: OpenClawPluginToolContext = {
@@ -204,13 +188,14 @@ describe("Pattern Strategy local watch tools", () => {
       requested_by: "openclaw_gateway",
       trace_id: "cron:strong-pivot:2026-06-12",
       trigger_type: "cron",
+      resolved_window: { start_date: "2026-06-12", end_date: "2026-06-12" },
     });
     const parsed = JSON.parse(result.content[0]!.text);
 
     expect(parsed.watch).toMatchObject({
-      idempotency_key: "cron-strong-pivot-breakout-2026-06-15",
-      trace_id: "cron:strong-pivot:2026-06-15",
-      market_date: "2026-06-15",
+      idempotency_key: "cron-strong-pivot-breakout-2026-06-12",
+      trace_id: "cron:strong-pivot:2026-06-12",
+      market_date: "2026-06-12",
       delivery_snapshot: {
         channel: "feishu",
         to: "user:ou_market",
@@ -221,7 +206,7 @@ describe("Pattern Strategy local watch tools", () => {
 
     const watch = await getAsyncWatch({ stateDir: tmpDir, jobId: "claw_strong_pivot" });
     expect(watch?.requestKey).toBe(
-      "strategy.strong_pivot_breakout.daily_scan:cron-strong-pivot-breakout-2026-06-15",
+      "strategy.strong_pivot_breakout.daily_scan:cron-strong-pivot-breakout-2026-06-12",
     );
   });
 
@@ -244,6 +229,14 @@ describe("Pattern Strategy local watch tools", () => {
     const result = await tool.execute("call-strong-pivot-watch", {
       job_id: "claw_strong_pivot",
       task_key: "strategy.strong_pivot_breakout.daily_scan",
+      idempotency_key: "cron-strong-pivot-breakout-2026-05-29",
+      request_key:
+        "strategy.strong_pivot_breakout.daily_scan:cron-strong-pivot-breakout-2026-05-29",
+      source: "openclaw_cron",
+      requested_by: "openclaw_gateway",
+      trace_id: "cron:strong-pivot-breakout:2026-05-29",
+      trigger_type: "cron",
+      resolved_window: { start_date: "2026-05-29", end_date: "2026-05-29" },
       enrich_signals: false,
     });
     const parsed = JSON.parse(result.content[0]!.text);
@@ -282,6 +275,8 @@ describe("Pattern Strategy local watch tools", () => {
       source: "openclaw_cron",
       request_key: "indice-daily-20260525",
       wake_mode: "now",
+      start_date: "2026-02-25",
+      refresh_date: "2026-05-25",
     });
     const parsed = JSON.parse(result.content[0]!.text);
 
@@ -295,6 +290,8 @@ describe("Pattern Strategy local watch tools", () => {
 
     const watch = await getIndiceAsyncWatch({ stateDir: tmpDir, jobId: "indice_job_1" });
     expect(watch?.source).toBe("openclaw_cron");
+    expect(watch?.startDate).toBe("2026-02-25");
+    expect(watch?.refreshDate).toBe("2026-05-25");
     expect(watch?.deliverySnapshot).toEqual({
       channel: "feishu",
       to: "user:ou_market",

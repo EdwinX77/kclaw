@@ -11,6 +11,7 @@ export type IndiceRefreshAsyncWatch = {
   source?: string;
   requestKey?: string;
   runLabel?: string;
+  startDate?: string;
   refreshDate?: string;
   deliverySnapshot?: {
     channel?: string;

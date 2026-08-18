@@ -782,6 +782,7 @@ export const __testing = {
   classifySignals,
   extractSignalRows,
   fetchRunStatus,
+  processIndiceWatch,
   processPendingWatch,
 };
 
@@ -2134,6 +2135,53 @@ async function processIndiceWatch(params: {
     pluginConfig: params.api.pluginConfig as PatternStrategyPluginConfig | undefined,
     jobId: params.watch.jobId,
   });
+  const remoteJobId = readFirstString(runData, ["job_id"]);
+  const remoteStartDate = extractMarketDateText(runData?.start_date);
+  const remoteEndDate = extractMarketDateText(runData?.end_date);
+  const derivedRequestKey = remoteEndDate
+    ? `indice-daily-${remoteEndDate.replaceAll("-", "")}`
+    : "";
+  const identityMismatch =
+    remoteJobId !== params.watch.jobId
+      ? `job_id expected ${params.watch.jobId}, received ${remoteJobId ?? "missing"}`
+      : params.watch.startDate && remoteStartDate !== params.watch.startDate
+        ? `start_date expected ${params.watch.startDate}, received ${remoteStartDate ?? "missing"}`
+        : params.watch.refreshDate && remoteEndDate !== params.watch.refreshDate
+          ? `end_date expected ${params.watch.refreshDate}, received ${remoteEndDate ?? "missing"}`
+          : params.watch.source === "openclaw_cron" &&
+              params.watch.requestKey &&
+              derivedRequestKey !== params.watch.requestKey
+            ? `request_key expected ${params.watch.requestKey}, received ${derivedRequestKey || "missing"}`
+            : undefined;
+  if (identityMismatch) {
+    const now = Date.now();
+    const error = `indice watch identity mismatch: ${identityMismatch}`;
+    await appendAgentInteractionAuditRecord({
+      kind: "async_watch_failed",
+      requesterSessionKey: params.watch.sessionKey,
+      sessionKey: params.watch.sessionKey,
+      agentId: params.watch.agentId,
+      jobId: params.watch.jobId,
+      status: "identity_mismatch",
+      summary: "pattern-strategy indice async watch rejected mismatched job identity",
+      data: {
+        source: params.watch.source,
+        requestKey: params.watch.requestKey,
+        startDate: params.watch.startDate,
+        refreshDate: params.watch.refreshDate,
+        error,
+      },
+    });
+    await updateIndiceAsyncWatch(params.stateDir, params.watch.jobId, (existing) => ({
+      ...existing,
+      lastRemoteStatus: "identity_mismatch",
+      deliveryStatus: "not-requested",
+      lastError: error,
+      updatedAt: now,
+      completedAt: now,
+    }));
+    return;
+  }
   const remoteStatus = normalizeStatus(runData?.status);
   if (!INDICE_TERMINAL_STATUSES.has(remoteStatus)) {
     await appendAgentInteractionAuditRecord({

@@ -1,6 +1,12 @@
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "../../../src/plugins/types.js";
 import { formatPatternQuotationResult, invokePatternQuotationTool } from "./client.js";
 import { createPatternQuotationLocalTools } from "./local-tools.js";
+import {
+  buildQuotationIdempotencyKey,
+  isRecord,
+  MARKET_TIMEZONE,
+  readMarketDate,
+} from "./quotation-identity.js";
 
 type PatternQuotationPluginConfig = {
   baseUrl?: string;
@@ -29,27 +35,6 @@ const objectSchema = (properties: Record<string, unknown>, required: string[] = 
 const stringSchema = () => ({ type: "string" });
 const numberSchema = () => ({ type: "number" });
 const arrayOfStringSchema = () => ({ type: "array", items: { type: "string" } });
-
-function formatShanghaiDate(date = new Date()) {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
-}
-
-function latestCompletedTradingDate(now = new Date()) {
-  const shanghaiDate = formatShanghaiDate(now);
-  const shanghaiNoon = new Date(`${shanghaiDate}T12:00:00+08:00`);
-  const day = shanghaiNoon.getUTCDay();
-  const offsetDays = day === 1 ? 3 : day === 0 ? 2 : day === 6 ? 1 : 1;
-  return formatShanghaiDate(new Date(shanghaiNoon.getTime() - offsetDays * 24 * 60 * 60 * 1000));
-}
-
-function compactDate(date: string) {
-  return date.replaceAll("-", "");
-}
 
 function readDate(params: Record<string, unknown>, key: string) {
   const value = params[key];
@@ -96,6 +81,10 @@ function inferSource(ctx: OpenClawPluginToolContext) {
   return "feishu_manual";
 }
 
+function isCronContext(ctx: OpenClawPluginToolContext) {
+  return inferSource(ctx) === "openclaw_cron";
+}
+
 function readStages(params: Record<string, unknown>) {
   const value = params.stages;
   if (!Array.isArray(value)) {
@@ -112,20 +101,71 @@ function readChainKey(params: Record<string, unknown>) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function defaultIdempotencyKey(params: {
-  startDate: string;
-  endDate: string;
-  chainKey?: string;
-  stages?: string[];
-}) {
-  const datePart =
-    params.startDate === params.endDate
-      ? compactDate(params.endDate)
-      : `${compactDate(params.startDate)}-${compactDate(params.endDate)}`;
-  if (params.stages?.length) {
-    return `quotation:stages:${params.stages.join("+")}:${datePart}`;
+type RemotePayload = Awaited<ReturnType<typeof invokePatternQuotationTool>>;
+
+function readRequiredCanonicalString(data: Record<string, unknown>, key: string) {
+  const value = data[key];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`quotation.refresh_run returned no canonical ${key}`);
   }
-  return `quotation:${params.chainKey ?? "custom"}:${datePart}`;
+  return value.trim();
+}
+
+function withCanonicalRefreshMetadata(params: {
+  payload: RemotePayload;
+  submittedArgs: Record<string, unknown>;
+}) {
+  if (params.payload.ok === false) {
+    return params.payload;
+  }
+  if (!isRecord(params.payload.data)) {
+    throw new Error("quotation.refresh_run returned no canonical job data");
+  }
+  const data = params.payload.data;
+  const startDate = readMarketDate(data.start_date);
+  const endDate = readMarketDate(data.end_date);
+  if (!startDate || !endDate) {
+    throw new Error("quotation.refresh_run returned invalid canonical start_date/end_date");
+  }
+  const requestKey =
+    typeof data.idempotency_key === "string" && data.idempotency_key.trim()
+      ? data.idempotency_key.trim()
+      : undefined;
+  readRequiredCanonicalString(data, "job_id");
+  const cronSubmission = params.submittedArgs.source === "openclaw_cron";
+  if (cronSubmission && !requestKey) {
+    throw new Error("quotation.refresh_run returned no canonical idempotency_key");
+  }
+
+  const expected = {
+    start_date: readMarketDate(params.submittedArgs.start_date),
+    end_date: readMarketDate(params.submittedArgs.end_date),
+    idempotency_key:
+      typeof params.submittedArgs.idempotency_key === "string"
+        ? params.submittedArgs.idempotency_key.trim()
+        : undefined,
+  };
+  const canonical = { start_date: startDate, end_date: endDate, idempotency_key: requestKey };
+  const mismatched = Object.entries(expected)
+    .filter(([, value]) => value !== undefined)
+    .filter(([key, value]) => canonical[key as keyof typeof canonical] !== value)
+    .map(([key]) => key);
+  if (mismatched.length > 0) {
+    throw new Error(
+      `quotation.refresh_run canonical response mismatched submitted request: ${mismatched.join(", ")}`,
+    );
+  }
+
+  return {
+    ...params.payload,
+    data: {
+      ...data,
+      requested_start_date: startDate,
+      requested_end_date: endDate,
+      ...(requestKey ? { request_key: requestKey } : {}),
+      market_timezone: MARKET_TIMEZONE,
+    },
+  };
 }
 
 function createRemoteTool(api: OpenClawPluginApi, ctx: OpenClawPluginToolContext, def: ToolDef) {
@@ -135,14 +175,19 @@ function createRemoteTool(api: OpenClawPluginApi, ctx: OpenClawPluginToolContext
     description: def.description,
     parameters: def.parameters,
     async execute(_id: string, params: Record<string, unknown>) {
+      const args = def.args(params, ctx);
       const payload = await invokePatternQuotationTool({
         pluginConfig: api.pluginConfig as PatternQuotationPluginConfig | undefined,
         toolName: def.remoteToolName,
-        args: def.args(params, ctx),
+        args,
       });
+      const effectivePayload =
+        def.remoteToolName === "quotation.refresh_run"
+          ? withCanonicalRefreshMetadata({ payload, submittedArgs: args })
+          : payload;
       return formatPatternQuotationResult({
         remoteToolName: def.remoteToolName,
-        payload,
+        payload: effectivePayload,
       });
     },
   };
@@ -153,7 +198,7 @@ const toolDefs: ToolDef[] = [
     name: "quotation_refresh_chain",
     label: "Quotation Refresh Chain",
     description:
-      "[Quotation sub-service][market/information refresh] Start a configurable quotation task chain. Use chain_key for configured chains such as pre_market/post_open, or stages for an explicit stage list.",
+      "[Quotation sub-service][market/information refresh] Start a configurable quotation task chain. In cron sessions, pass only chain_key or stages: the bridge forces source=openclaw_cron while the Pattern backend resolves the chain-specific Asia/Shanghai business dates and canonical idempotency key. Model-supplied cron dates and keys are ignored. Use chain_key for configured chains such as pre_market/post_open, or stages for an explicit stage list.",
     remoteToolName: "quotation.refresh_run",
     parameters: objectSchema({
       chain_key: stringSchema(),
@@ -173,27 +218,38 @@ const toolDefs: ToolDef[] = [
       if (!chainKey && !stages?.length) {
         throw new Error("quotation_refresh_chain requires chain_key or stages");
       }
-      const fallbackDate = latestCompletedTradingDate();
-      const startDate = readDate(params, "start_date") ?? fallbackDate;
-      const endDate = readDate(params, "end_date") ?? fallbackDate;
-      const source =
-        typeof params.source === "string" && params.source.trim()
+      const cronContext = isCronContext(ctx);
+      const startDate = readDate(params, "start_date");
+      const endDate = readDate(params, "end_date");
+      if (!cronContext && Boolean(startDate) !== Boolean(endDate)) {
+        throw new Error("quotation_refresh_chain requires start_date and end_date together");
+      }
+      const source = cronContext
+        ? "openclaw_cron"
+        : typeof params.source === "string" && params.source.trim()
           ? params.source.trim()
           : inferSource(ctx);
-      const idempotencyKey =
-        typeof params.idempotency_key === "string" && params.idempotency_key.trim()
-          ? params.idempotency_key.trim()
-          : defaultIdempotencyKey({ startDate, endDate, chainKey, stages });
       const args: Record<string, unknown> = {
-        start_date: startDate,
-        end_date: endDate,
         include_symbols: readSymbols(params),
         symbols: readSymbolsArray(params),
         adjust: readAdjust(params),
         max_workers: readMaxWorkers(params),
         source,
-        idempotency_key: idempotencyKey,
       };
+      if (!cronContext && startDate && endDate) {
+        args.start_date = startDate;
+        args.end_date = endDate;
+        args.idempotency_key =
+          typeof params.idempotency_key === "string" && params.idempotency_key.trim()
+            ? params.idempotency_key.trim()
+            : buildQuotationIdempotencyKey({ startDate, endDate, chainKey, stages });
+      } else if (
+        !cronContext &&
+        typeof params.idempotency_key === "string" &&
+        params.idempotency_key.trim()
+      ) {
+        args.idempotency_key = params.idempotency_key.trim();
+      }
       if (stages?.length) {
         args.stages = stages;
       } else {

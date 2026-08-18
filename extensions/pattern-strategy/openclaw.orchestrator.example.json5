@@ -40,6 +40,10 @@
   },
 
   agents: {
+    defaults: {
+      userTimezone: "Asia/Shanghai",
+      envelopeTimezone: "user",
+    },
     list: [
       {
         id: "tas-dispatch",
@@ -141,12 +145,7 @@
   tools: {
     agentToAgent: {
       enabled: true,
-      allow: [
-        "pattern-strategy",
-        "pattern-quotation",
-        "market-research",
-        "market-memory",
-      ],
+      allow: ["pattern-strategy", "pattern-quotation", "market-research", "market-memory"],
     },
     sessions: {
       visibility: "all",
@@ -193,7 +192,7 @@
   //   openclaw cron add --name "Pattern Quotation daily refresh" --cron "20 13 * * 1-5" --tz Asia/Shanghai --session isolated --agent pattern-quotation --message "Run the Pattern Quotation daily refresh. Use quotation_refresh_today, return job_id and message, then register quotation_watch_refresh if the job is not terminal. Terminal quotation completion should be delivered directly from the service message without LLM rewriting." --announce --channel feishu --to "chat:oc_926ae0fb9d722371720c4d2d9d89f6ac"
   // - Cron does not model job dependencies such as "after Pattern Quotation completes".
   //   Schedule the supporting board-index refresh at a fixed later slot, for example 09:00:
-  //   openclaw cron add --name "board index daily refresh" --cron "0 9 * * 1-5" --tz Asia/Shanghai --session isolated --agent pattern-strategy --message "Run the Pattern board-index daily refresh for the previous trading day. Use indice_refresh_run with dimensions=[\"industry\",\"size\",\"style\",\"concept\"], refresh_turnover=true, force_universe=false, source=openclaw_cron, and idempotency_key=indice-daily-YYYYMMDD. Return job_id/status/message, then call indice_watch_refresh so the terminal result is pushed to Feishu without LLM polling." --announce --channel feishu --to "chat:oc_926ae0fb9d722371720c4d2d9d89f6ac"
+  //   openclaw cron add --name "board index daily refresh" --cron "0 9 * * 1-5" --tz Asia/Shanghai --session isolated --agent pattern-strategy --message "Run the Pattern board-index daily refresh. Call indice_refresh_run with dimensions=[\"industry\",\"size\",\"style\",\"concept\"], refresh_turnover=true, and force_universe=false only. Do not pass or calculate dates, source, or idempotency_key. Forward the backend-returned start_date/end_date/idempotency_key to indice_watch_refresh so the terminal result is pushed to Feishu without LLM polling." --announce --channel feishu --to "chat:oc_926ae0fb9d722371720c4d2d9d89f6ac"
   // - Keep the Pattern Strategy scan at 15:20 Asia/Shanghai or later so it reads refreshed
   //   quotation, equity event, margin trading, and financial-report-month supplemental data.
 

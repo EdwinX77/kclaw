@@ -101,7 +101,7 @@ describe("Pattern Quotation local watch tools", () => {
     const result = await tool.execute("call-quotation-watch", {
       job_id: "quotation_job_1",
       source: "openclaw_cron",
-      request_key: "quotation-refresh:2026-06-15",
+      request_key: "quotation:pre_market:20260615",
       run_label: "daily-market-refresh",
       wake_mode: "now",
       refresh_date: "2026-06-15",
@@ -121,6 +121,11 @@ describe("Pattern Quotation local watch tools", () => {
       to: "user:ou_market",
       accountId: "main",
       threadId: "thread-market-refresh",
+    });
+    expect(watch).toMatchObject({
+      source: "openclaw_cron",
+      requestKey: "quotation:pre_market:20260615",
+      refreshDate: "2026-06-15",
     });
   });
 });

@@ -26,6 +26,10 @@
   },
 
   agents: {
+    defaults: {
+      userTimezone: "Asia/Shanghai",
+      envelopeTimezone: "user",
+    },
     list: [
       {
         id: "pattern-strategy",

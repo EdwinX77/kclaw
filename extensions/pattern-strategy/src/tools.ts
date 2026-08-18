@@ -10,6 +10,7 @@ import {
   resolveLatestAvailableTradeDate,
   type LatestAvailableTradeDate,
 } from "./market-calendar.js";
+import { extractMarketDateText } from "./model-boundary-harness.js";
 import {
   findActiveStrategyWatch,
   isStrategyTerminalStatus,
@@ -74,17 +75,41 @@ function withSubmissionData(params: {
   latestTradeDate?: LatestAvailableTradeDate;
 }) {
   const data = dataRecord(params.payload.data);
+  const requestKey = readRequiredString(data, "request_key");
+  const expectedPrefix = `${params.submission.taskKey}:`;
+  if (!requestKey.startsWith(expectedPrefix)) {
+    throw new Error("strategy.task_run returned a request_key for a different task");
+  }
+  const requestIdempotencyKey = requestKey.slice(expectedPrefix.length).trim();
+  const responseIdempotencyKey =
+    typeof data.idempotency_key === "string" && data.idempotency_key.trim()
+      ? data.idempotency_key.trim()
+      : requestIdempotencyKey;
+  if (!requestIdempotencyKey || requestKey !== `${expectedPrefix}${responseIdempotencyKey}`) {
+    throw new Error("strategy.task_run returned inconsistent canonical idempotency metadata");
+  }
+  const resolvedWindow = dataRecord(data.resolved_window);
+  const marketDate = extractMarketDateText(resolvedWindow.end_date);
+  if (!marketDate) {
+    throw new Error("strategy.task_run returned no canonical resolved_window.end_date");
+  }
+  if (
+    params.submission.triggerType === "cron" &&
+    extractMarketDateText(responseIdempotencyKey) !== marketDate
+  ) {
+    throw new Error("strategy.task_run canonical request_key does not match resolved_window");
+  }
   return {
     ...params.payload,
     data: {
       ...data,
       task_key: params.submission.taskKey,
-      idempotency_key: params.submission.idempotencyKey,
+      idempotency_key: responseIdempotencyKey,
       source: params.submission.source,
       requested_by: params.submission.requestedBy,
       trace_id: params.submission.traceId,
       trigger_type: params.submission.triggerType,
-      market_date: params.submission.marketDate,
+      market_date: marketDate,
       latest_trade_date_source: params.latestTradeDate?.source,
     },
   };
@@ -96,6 +121,41 @@ function readRequiredString(params: Record<string, unknown>, key: string) {
     throw new Error(`${key} required`);
   }
   return value.trim();
+}
+
+function isCronContext(ctx: OpenClawPluginToolContext) {
+  return /(?:^|:)cron:/.test(ctx.sessionKey?.trim() ?? "");
+}
+
+function normalizeCronIndiceRefreshParams(params: Record<string, unknown>) {
+  return {
+    dimensions: params.dimensions,
+    ...(typeof params.refresh_turnover === "boolean"
+      ? { refresh_turnover: params.refresh_turnover }
+      : {}),
+    ...(typeof params.force_universe === "boolean"
+      ? { force_universe: params.force_universe }
+      : {}),
+    source: "openclaw_cron",
+  };
+}
+
+function assertCanonicalCronIndiceResponse(payload: RemotePayload) {
+  if (payload.ok === false) {
+    return payload;
+  }
+  const data = dataRecord(payload.data);
+  for (const key of ["job_id", "start_date", "end_date", "idempotency_key"] as const) {
+    readRequiredString(data, key);
+  }
+  if (readRequiredString(data, "source") !== "openclaw_cron") {
+    throw new Error("indice.refresh_run returned a non-cron canonical source");
+  }
+  return payload;
+}
+
+function inferCronJobId(ctx: OpenClawPluginToolContext) {
+  return /(?:^|:)cron:([^:]+)(?::|$)/.exec(ctx.sessionKey?.trim() ?? "")?.[1];
 }
 
 function enforceManualCancel(params: Record<string, unknown>) {
@@ -144,28 +204,36 @@ async function assertRunSucceededBeforeSignalFetch(params: {
   }
 }
 
-function createRemoteTool(api: OpenClawPluginApi, _ctx: OpenClawPluginToolContext, def: ToolDef) {
+function createRemoteTool(api: OpenClawPluginApi, ctx: OpenClawPluginToolContext, def: ToolDef) {
   return {
     name: def.name,
     label: def.label,
     description: def.description,
     parameters: def.parameters,
     async execute(_id: string, params: Record<string, unknown>) {
-      let submission =
-        def.remoteToolName === "strategy.task_run"
-          ? validateStrategyTaskRunSubmission(params)
-          : undefined;
+      let submission: StrategyTaskRunSubmission | undefined;
       let latestTradeDate: LatestAvailableTradeDate | undefined;
       let remoteParams = params;
       const pluginConfig = api.pluginConfig as PatternStrategyPluginConfig | undefined;
-      if (submission?.triggerType === "cron") {
-        latestTradeDate = await resolveLatestAvailableTradeDate({
-          pluginConfig,
-          logger: api.logger,
-        });
-        const normalized = normalizeCronStrategyTaskRunParams(params, latestTradeDate.tradeDate);
-        submission = normalized.submission;
-        remoteParams = normalized.params;
+      const cronIndiceSubmission =
+        def.remoteToolName === "indice.refresh_run" && isCronContext(ctx);
+      if (def.remoteToolName === "strategy.task_run") {
+        const cronSubmission = isCronContext(ctx) || params.trigger_type === "cron";
+        if (cronSubmission) {
+          latestTradeDate = await resolveLatestAvailableTradeDate({
+            pluginConfig,
+            logger: api.logger,
+          });
+          const normalized = normalizeCronStrategyTaskRunParams(params, latestTradeDate.tradeDate, {
+            cronJobId: inferCronJobId(ctx),
+          });
+          submission = normalized.submission;
+          remoteParams = normalized.params;
+        } else {
+          submission = validateStrategyTaskRunSubmission(params);
+        }
+      } else if (cronIndiceSubmission) {
+        remoteParams = normalizeCronIndiceRefreshParams(params);
       }
       if (submission) {
         const activeWatch = await findGatewayActiveWatch({ api, submission });
@@ -236,7 +304,9 @@ function createRemoteTool(api: OpenClawPluginApi, _ctx: OpenClawPluginToolContex
       const resultPayload =
         submission && def.remoteToolName === "strategy.task_run"
           ? withSubmissionData({ payload, submission, latestTradeDate })
-          : payload;
+          : cronIndiceSubmission
+            ? assertCanonicalCronIndiceResponse(payload)
+            : payload;
       return await formatPatternStrategyResult({
         remoteToolName: def.remoteToolName,
         payload: resultPayload,
@@ -267,7 +337,7 @@ const toolDefs: ToolDef[] = [
     name: "strategy_task_run",
     label: "Strategy Task Run",
     description:
-      "Submit a Pattern Strategy task run through the shared backend queue and return the authoritative `job_id` for user-visible processing status. `trigger_type` must be one of cron, gateway_recovery, manual, or retry; use manual for fresh Feishu user requests, not manual_retry. Cron submissions are normalized through `market.latest_available_trade_date` before remote submission. Bridges remote tool `strategy.task_run`.",
+      "Submit a Pattern Strategy task run through the shared backend queue and return the authoritative `job_id` for user-visible processing status. Cron sessions only need task_key and overrides; the bridge forwards cron business intent, while the backend-returned request_key, idempotency_key, and resolved_window are authoritative. Non-cron calls must provide trigger_type and the required submission metadata; use manual for fresh Feishu user requests, not manual_retry. Bridges remote tool `strategy.task_run`.",
     remoteToolName: "strategy.task_run",
     parameters: objectSchema(
       {
@@ -280,7 +350,7 @@ const toolDefs: ToolDef[] = [
         trigger_type: stringSchema(),
         run_label: stringSchema(),
       },
-      ["task_key", "idempotency_key", "source", "requested_by", "trace_id", "trigger_type"],
+      ["task_key"],
     ),
   },
   {
@@ -445,7 +515,7 @@ const toolDefs: ToolDef[] = [
     name: "indice_refresh_run",
     label: "Indice Refresh Run",
     description:
-      "Start a Pattern board-index refresh job for industry, size, style, and concept indices. Bridges remote tool `indice.refresh_run`.",
+      "Start a Pattern board-index refresh job for industry, size, style, and concept indices. In cron sessions, pass dimensions/options only: the bridge forces source=openclaw_cron and the Pattern backend owns dates and idempotency. Bridges remote tool `indice.refresh_run`.",
     remoteToolName: "indice.refresh_run",
     parameters: objectSchema(
       {
@@ -457,7 +527,7 @@ const toolDefs: ToolDef[] = [
         source: stringSchema(),
         idempotency_key: stringSchema(),
       },
-      ["start_date", "end_date", "dimensions", "idempotency_key"],
+      ["dimensions"],
     ),
   },
   {

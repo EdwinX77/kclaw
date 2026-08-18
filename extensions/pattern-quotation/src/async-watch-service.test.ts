@@ -42,7 +42,7 @@ function createWatch(): QuotationRefreshAsyncWatch {
     wakeMode: "now",
     followupMode: "heartbeat-system-event",
     source: "openclaw_cron",
-    requestKey: "quotation-refresh:2026-06-15",
+    requestKey: "quotation:pre_market:20260615",
     runLabel: "daily-market-refresh",
     refreshDate: "2026-06-15",
     registeredAt: 1,
@@ -72,6 +72,10 @@ describe("Pattern Quotation async watch service", () => {
             data: {
               job_id: watch.jobId,
               status: "completed",
+              chain_key: "pre_market",
+              stages: ["events", "prices", "financials"],
+              start_date: "2026-06-15",
+              end_date: "2026-06-15",
               stage: "done",
               progress: 1,
               failed_symbols: 0,
@@ -96,6 +100,58 @@ describe("Pattern Quotation async watch service", () => {
       deliveryStatus: "not-requested",
     });
     expect(updated?.lastError).toBeUndefined();
+    expect(updated?.completedAt).toEqual(expect.any(Number));
+  });
+
+  it.each([
+    {
+      label: "date",
+      identity: {
+        chain_key: "pre_market",
+        stages: ["events", "prices", "financials"],
+        start_date: "2026-06-14",
+        end_date: "2026-06-14",
+      },
+      expected: "end_date expected 2026-06-15, received 2026-06-14",
+    },
+    {
+      label: "request key",
+      identity: {
+        chain_key: "post_open",
+        stages: ["margin_trading"],
+        start_date: "2026-06-15",
+        end_date: "2026-06-15",
+      },
+      expected:
+        "request_key expected quotation:pre_market:20260615, received quotation:post_open:20260615",
+    },
+  ])("rejects a terminal job with mismatched $label identity", async ({ identity, expected }) => {
+    const stateDir = await makeTempStateDir();
+    const watch = createWatch();
+    await upsertAsyncWatch({ stateDir, watch });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ok: true,
+              tool_name: "quotation.refresh_get",
+              data: { job_id: watch.jobId, status: "completed", failed_symbols: 0, ...identity },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+
+    await __testing.processQuotationWatch({ api: createApi(stateDir), stateDir, watch });
+
+    const updated = await getAsyncWatch({ stateDir, jobId: watch.jobId });
+    expect(updated).toMatchObject({
+      lastRemoteStatus: "identity_mismatch",
+      deliveryStatus: "not-requested",
+      lastError: expect.stringContaining(expected),
+    });
     expect(updated?.completedAt).toEqual(expect.any(Number));
   });
 });

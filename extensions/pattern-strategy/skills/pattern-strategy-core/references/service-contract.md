@@ -33,8 +33,8 @@ If another OpenClaw deployment needs to wire this service in, the target is:
 1. Prefer `strategy.task_run` for execution.
 2. If task details are missing, inspect with `strategy.task_list` or `strategy.task_describe`.
 3. Pass only template-declared overrides.
-4. Every `strategy.task_run` call must include stable Gateway queue metadata:
-   `idempotency_key`, `source`, `requested_by`, `trace_id`, and `trigger_type`.
+4. Manual and recovery `strategy.task_run` calls require stable Gateway queue metadata:
+   `idempotency_key`, `source`, `requested_by`, `trace_id`, and `trigger_type`. In an OpenClaw cron session the model passes only `task_key` and allowed `overrides`; the Pattern backend's returned identity and `resolved_window` are authoritative and must be forwarded unchanged.
 5. Track nonterminal states with `strategy.get_run`.
 6. Read detailed results with `strategy.get_signals` after success.
 7. Cancel only on explicit user request; never cancel to preempt a scheduled run.
@@ -60,7 +60,8 @@ Interpretation note:
 
 ### `strategy.task_run`
 
-- Required: `task_key`, `idempotency_key`, `source`, `requested_by`, `trace_id`, `trigger_type`
+- Manual/recovery input: `task_key`, `idempotency_key`, `source`, `requested_by`, `trace_id`, `trigger_type`
+- OpenClaw cron bridge input: `task_key` plus optional `overrides`; the Pattern backend returns the canonical `request_key`, `idempotency_key`, and `resolved_window`, which the bridge forwards unchanged
 - Optional: `overrides`, `run_label`
 - Key output: `job_id`, `run_id`, `strategy`, `status`, `backend`, `request_key`, `resolved_window`
 - `job_id` and `run_id` can currently be treated as the same execution identifier
@@ -85,6 +86,14 @@ Interpretation note:
 - Returns signal rows produced by the run
 - Applies the MCP-facing signal-delivery policy when shaping the returned result set
 - Returns delivery metadata describing how the read was filtered
+
+### `indice.refresh_run`
+
+- Starts a Pattern board-index refresh.
+- Manual input: explicit `start_date`, `end_date`, dimensions/options, and a stable idempotency key.
+- OpenClaw cron bridge input: dimensions/options only. The bridge forces `source=openclaw_cron`; Pattern resolves the `Asia/Shanghai` business window and canonical idempotency key.
+- Key output: `job_id`, `status`, `start_date`, `end_date`, `idempotency_key`, `source`.
+- Treat the returned dates and key as authoritative and forward them unchanged to `indice_watch_refresh`.
 
 ### `market.list_price_cache`
 
@@ -223,11 +232,12 @@ Note:
 1. `time_window.start_date` and `time_window.end_date` must appear together.
 2. If no explicit dates are given, the service resolves the window from `anchor + lookback_days`.
 3. Extra fields outside `allowed_overrides` cause validation errors.
-4. Suggested idempotency keys:
+4. Suggested idempotency keys for explicit non-cron requests:
 
-- scheduled: `cron:{task_key}:{scheduled_fire_time}`
 - manual: `manual:{task_key}:{timestamp_or_request_id}`
 - Feishu: `feishu:{chat_id}:{message_id}`
+
+Scheduled keys come only from the Pattern backend's canonical response; the model and prompt must not construct them.
 
 ## Recommended workflows
 
@@ -241,11 +251,7 @@ Note:
 
 1. Confirm `task_key`
 2. Build valid `overrides`
-3. Generate stable queue metadata. Normal cron uses
-   `idempotency_key=cron-{strategy-alias}-{yyyy-mm-dd}` and `trigger_type=cron`.
-   Gateway recovery after PI reports `timeout` or `failed` uses
-   `idempotency_key=recovery-{strategy-alias}-{yyyy-mm-dd}-{attempt}` and
-   `trigger_type=gateway_recovery`.
+3. For a normal OpenClaw cron session, pass only `task_key` and allowed `overrides`; the Pattern backend derives and returns the authoritative `idempotency_key=cron-{strategy-alias}-{yyyy-mm-dd}` plus `request_key` and `resolved_window` under its `Asia/Shanghai` task policy. Do not calculate or pass those fields from the model. For Gateway recovery after PI reports `timeout` or `failed`, request `trigger_type=gateway_recovery` and forward the backend's canonical recovery identity unchanged.
 4. Call `strategy.task_run`
 5. Return `job_id`, status, and resolved window
 6. If continued tracking is requested, call `strategy.get_run`

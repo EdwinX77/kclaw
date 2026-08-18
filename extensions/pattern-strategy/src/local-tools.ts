@@ -24,7 +24,6 @@ import {
   type AutomationRunRecord,
   type AutomationRunFilter,
 } from "./automation-run-store.js";
-import type { PatternStrategyPluginConfig } from "./client.js";
 import {
   getIndiceAsyncWatch,
   listIndiceAsyncWatches,
@@ -32,12 +31,8 @@ import {
   type IndiceRefreshAsyncWatch,
   upsertIndiceAsyncWatch,
 } from "./indice-watch-store.js";
-import { resolveLatestAvailableTradeDate } from "./market-calendar.js";
 import { extractMarketDateText, MARKET_TIMEZONE } from "./model-boundary-harness.js";
-import {
-  normalizeCronStrategyWatchParams,
-  resolveSubmissionMarketDate,
-} from "./strategy-submission.js";
+import { resolveSubmissionMarketDate } from "./strategy-submission.js";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: "object",
@@ -430,6 +425,7 @@ const localToolDefs: LocalToolDef[] = [
         session_key: stringSchema(),
         agent_id: stringSchema(),
         wake_mode: stringEnumSchema(["now", "next-heartbeat"]),
+        start_date: stringSchema(),
         refresh_date: stringSchema(),
       },
       ["job_id"],
@@ -455,6 +451,19 @@ const localToolDefs: LocalToolDef[] = [
         readString(params, "wake_mode") === "next-heartbeat"
           ? ("next-heartbeat" as AsyncCompletionWakeMode)
           : ("now" as AsyncCompletionWakeMode);
+      const source = readString(params, "source");
+      const requestKey = readString(params, "request_key");
+      const startDate = extractMarketDateText(params.start_date);
+      const refreshDate = extractMarketDateText(params.refresh_date);
+      const cronWatch = source === "openclaw_cron" || /(?:^|:)cron:/.test(sessionKey);
+      if (cronWatch && (!requestKey || !startDate || !refreshDate)) {
+        throw new Error(
+          "indice_watch_refresh requires backend-returned start_date, refresh_date, and request_key for cron jobs",
+        );
+      }
+      if (cronWatch && requestKey !== `indice-daily-${refreshDate?.replaceAll("-", "")}`) {
+        throw new Error("indice_watch_refresh request_key does not match refresh_date");
+      }
       const now = Date.now();
       const watch: IndiceRefreshAsyncWatch = {
         kind: "indice_refresh",
@@ -462,10 +471,11 @@ const localToolDefs: LocalToolDef[] = [
         sessionKey,
         agentId,
         wakeMode,
-        source: readString(params, "source"),
-        requestKey: readString(params, "request_key"),
+        source,
+        requestKey,
         runLabel: readString(params, "run_label"),
-        refreshDate: readString(params, "refresh_date"),
+        startDate,
+        refreshDate,
         registeredAt: now,
         updatedAt: now,
       };
@@ -488,6 +498,7 @@ const localToolDefs: LocalToolDef[] = [
           requestKey: watch.requestKey,
           runLabel: watch.runLabel,
           wakeMode: watch.wakeMode,
+          startDate: watch.startDate,
           refreshDate: watch.refreshDate,
           deliverySnapshot: watch.deliverySnapshot ?? null,
         },
@@ -502,6 +513,7 @@ const localToolDefs: LocalToolDef[] = [
           session_key: watch.sessionKey,
           agent_id: watch.agentId,
           wake_mode: watch.wakeMode,
+          start_date: watch.startDate,
           refresh_date: watch.refreshDate,
           heartbeat_enabled: isHeartbeatEnabledForAgent(api.config, watch.agentId),
           heartbeat_summary: resolveHeartbeatSummaryForAgent(api.config, watch.agentId),
@@ -596,17 +608,7 @@ const localToolDefs: LocalToolDef[] = [
       ["job_id"],
     ),
     async execute(ctx, params, api) {
-      let watchParams = params;
-      if (
-        readString(params, "trigger_type") === "cron" &&
-        (readString(params, "idempotency_key") || readString(params, "request_key"))
-      ) {
-        const latestTradeDate = await resolveLatestAvailableTradeDate({
-          pluginConfig: api.pluginConfig as PatternStrategyPluginConfig | undefined,
-          logger: api.logger,
-        });
-        watchParams = normalizeCronStrategyWatchParams(params, latestTradeDate.tradeDate).params;
-      }
+      const watchParams = params;
       const jobId = typeof params.job_id === "string" ? params.job_id.trim() : "";
       if (!jobId) {
         throw new Error("strategy_watch_run requires job_id");
@@ -637,28 +639,52 @@ const localToolDefs: LocalToolDef[] = [
         typeof watchParams.task_key === "string" && watchParams.task_key.trim()
           ? watchParams.task_key.trim()
           : undefined;
+      const idempotencyKey = readString(watchParams, "idempotency_key");
+      const requestKey = readString(watchParams, "request_key");
+      const resolvedWindowDate = resolveSubmissionMarketDate({
+        overrides: watchParams.resolved_window,
+      });
+      const idempotencyMarketDate = resolveSubmissionMarketDate({ idempotencyKey });
+      const resolvedMarketDate = resolvedWindowDate ?? idempotencyMarketDate;
+      const source = readString(watchParams, "source");
+      const requestedBy = readString(watchParams, "requested_by");
+      const traceId = readString(watchParams, "trace_id");
+      const triggerType = readString(watchParams, "trigger_type");
+      const cronWatch = triggerType === "cron" || /(?:^|:)cron:/.test(sessionKey);
+      if (cronWatch) {
+        if (
+          !taskKey ||
+          !idempotencyKey ||
+          !requestKey ||
+          !resolvedWindowDate ||
+          source !== "openclaw_cron" ||
+          !requestedBy ||
+          !traceId ||
+          triggerType !== "cron"
+        ) {
+          throw new Error(
+            "strategy_watch_run requires the complete backend-returned cron identity and resolved_window",
+          );
+        }
+        if (requestKey !== `${taskKey}:${idempotencyKey}`) {
+          throw new Error("strategy_watch_run request_key does not match idempotency_key");
+        }
+        if (idempotencyMarketDate !== resolvedWindowDate) {
+          throw new Error("strategy_watch_run idempotency_key does not match resolved_window");
+        }
+      }
       const forceEnrichment = shouldForceEnrichment(taskKey);
       const watch: PatternStrategyAsyncWatch = {
         kind: "pattern_strategy_run",
         jobId,
         taskKey,
-        idempotencyKey:
-          readString(watchParams, "idempotency_key") ?? readString(watchParams, "request_key"),
-        source: readString(watchParams, "source"),
-        requestedBy: readString(watchParams, "requested_by"),
-        traceId: readString(watchParams, "trace_id"),
-        triggerType: readString(watchParams, "trigger_type"),
-        marketDate: resolveSubmissionMarketDate({
-          idempotencyKey:
-            readString(watchParams, "idempotency_key") ?? readString(watchParams, "request_key"),
-          overrides: watchParams.resolved_window,
-        }),
-        requestKey:
-          typeof watchParams.request_key === "string" && watchParams.request_key.trim()
-            ? watchParams.request_key.trim()
-            : typeof watchParams.idempotency_key === "string" && watchParams.idempotency_key.trim()
-              ? watchParams.idempotency_key.trim()
-              : undefined,
+        idempotencyKey: idempotencyKey ?? requestKey,
+        source,
+        requestedBy,
+        traceId,
+        triggerType,
+        marketDate: resolvedMarketDate,
+        requestKey: requestKey ?? idempotencyKey,
         runLabel:
           typeof watchParams.run_label === "string" && watchParams.run_label.trim()
             ? watchParams.run_label.trim()

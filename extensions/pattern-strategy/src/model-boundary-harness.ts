@@ -41,9 +41,9 @@ function hasExplicitTimezone(value: string) {
   return /(?:z|[+-]\d{2}:?\d{2})$/i.test(value);
 }
 
-export function formatMarketDate(date: Date, timeZone = MARKET_TIMEZONE): MarketDateText {
+export function formatMarketDate(date: Date): MarketDateText {
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
+    timeZone: MARKET_TIMEZONE,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
